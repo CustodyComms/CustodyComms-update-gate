@@ -1,0 +1,9 @@
+{
+  "runsIn": "CustodyComms/CustodyComms-update-gate",
+  "stagingRepo": "CustodyComms/CustodyComms-update-gate",
+  "feedRepos": [
+    "CustodyComms/CustodyComms-release-binaries",
+    "CustodyComms/CustodyComms-release-binaries-mac",
+    "CustodyComms/CustodyComms-release-binaries-win"
+  ]
+}

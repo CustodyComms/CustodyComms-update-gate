@@ -1,0 +1,192 @@
+{
+  "format": "cc-from-versions/1",
+  "measured": "2026-11-20 from the public release listings (sizes, sha256 digests), each release's latest.yml / latest-mac.yml (sha512) and HTTP HEAD of the full installers",
+  "analyticsHosts": [
+    "www.google-analytics.com",
+    "region1.google-analytics.com"
+  ],
+  "fullInstallers": {
+    "windows-1.9.0": {
+      "url": "https://dl.custodycomms.com/Windows/CustodyComms-Setup-1.9.0.exe",
+      "size": 2438365720,
+      "sha256": "493905440e746d78aa1fc2952b3032d306ca835408f6667d37e20ef3283dec70"
+    },
+    "macos-1.9.0": {
+      "url": "https://dl.custodycomms.com/mac/CustodyComms-1.9.0-mac-arm64.dmg",
+      "size": 2508221903,
+      "sha256": "46622f92c1bb37d65b5ba31342d5084b4667e416a8df9d5ba737219d69430f7b"
+    },
+    "macos-2.0.1": {
+      "url": "https://dl.custodycomms.com/mac/CustodyComms-2.0.1-mac-arm64.dmg",
+      "size": 2338548535,
+      "sha256": null
+    }
+  },
+  "windows": {
+    "1.9.0": {
+      "offer": "window",
+      "recipe": [
+        "full:windows-1.9.0"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v1.9.0/CustodyComms-Setup-1.9.0-update.exe",
+        "name": "CustodyComms-Setup-1.9.0-update.exe",
+        "size": 119063384,
+        "sha256": "15b5292b22a5feeeb9131990ba878e44d858897c6c8dbc64a4b9ae69db371d5d",
+        "sha512": "bcMdgpKUOAd870WKNeRtTPFLM4cIizdx/iKxZ8H/TW22WUhYD61u4Jv3yha3Fub4ECbydOWvf1N67/gldKatKQ=="
+      }
+    },
+    "1.9.1": {
+      "offer": "window",
+      "coveredBy": "1.9.0",
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v1.9.1/CustodyComms-Setup-1.9.1-update.exe",
+        "name": "CustodyComms-Setup-1.9.1-update.exe",
+        "size": 117349096,
+        "sha256": "8f808839b2c6962e1d217f66f65dfaed875fa4d1f39d59b6007b3b9569084456",
+        "sha512": "QX1cWRuHBCciXWVvCMyBYnJKKcSmXZkn30Ln03SLG/Kz4OPMGWjDBQV9cfXbtAE86Ku67SpCPGc+H2LdYMVVUQ=="
+      }
+    },
+    "2.0.0": {
+      "offer": "header-button",
+      "recipe": [
+        "full:windows-1.9.0",
+        "update:2.0.0"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.0/CustodyComms-Setup-2.0.0-update.exe",
+        "name": "CustodyComms-Setup-2.0.0-update.exe",
+        "size": 160613440,
+        "sha256": "f66da5dcf3d6fe464a56e4dd4b3b18989d903a855b2cab39a374c62ed5a74d4b",
+        "sha512": "u6/kf+DT2pKVjy9ZMaakv2S6yFdIAibSx+UoA+dnoigmUwbvnhZgtUELsTaMPgisLATM1XMunckGUUxQFzhMFQ=="
+      }
+    },
+    "2.0.1": {
+      "offer": "header-button",
+      "recipe": [
+        "full:windows-1.9.0",
+        "update:2.0.1"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.1/CustodyComms-Setup-2.0.1-update.exe",
+        "name": "CustodyComms-Setup-2.0.1-update.exe",
+        "size": 160815856,
+        "sha256": "8a54a45c4beb8b353b9fb070605828902d2623393e0df7f4d477636d93f8b498",
+        "sha512": "AzMHr2xVqHSefQ28euKXpJHQlAuR3O2zElbm0mQ12ZMWFz8muTRrVSXPBfMaEFVj8Zt3+Y3WWx74fpEqLr1TxQ=="
+      }
+    },
+    "2.0.2": {
+      "offer": "header-button",
+      "recipe": [
+        "full:windows-1.9.0",
+        "update:2.0.2"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.2/CustodyComms-Setup-2.0.2-update.exe",
+        "name": "CustodyComms-Setup-2.0.2-update.exe",
+        "size": 160810872,
+        "sha256": "5cbf7702dc1d0cff772a2c4731a1120f86aee634bf64d75deb585f4150ebdc27",
+        "sha512": "1UDlTIUhBV51gNjed+6fs79VACk/dG7a/bA3pZ1iX358FdOAkAY2jH/dKX6IE5iZER9CUtanEvMcJkZ0rsSvYw=="
+      }
+    },
+    "2.0.3": {
+      "offer": "header-button",
+      "recipe": [
+        "full:windows-1.9.0",
+        "update:2.0.3"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.3/CustodyComms-Setup-2.0.3-update.exe",
+        "name": "CustodyComms-Setup-2.0.3-update.exe",
+        "size": 160859720,
+        "sha256": "04f04e30f6bd35f9cda8edd39b4fcb894491a61d65066a58760bb311e5af21bd",
+        "sha512": "Btke1WtbHjLJQ+Eb+v85OyMjiCUGNDqFmbbdgbQDPLEDgWHBtosXPB+6FAbxfOw5VDSkhsaXy/cHIkLoydsFMQ=="
+      }
+    },
+    "2.0.4": {
+      "offer": "header-button",
+      "recipe": [
+        "full:windows-1.9.0",
+        "update:2.0.4"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.4/CustodyComms-Setup-2.0.4-update.exe",
+        "name": "CustodyComms-Setup-2.0.4-update.exe",
+        "size": 170992160,
+        "sha256": "9b5e0855ca545862f91a1d71864188b65c503f93559ed1b624011ec3767ebf1b",
+        "sha512": "a7Z1sxx31ezs3NaOjMfJ79rioatMGZl9zEfn33tZHr2EfbskbKT/BEdfWalHxBdO80tYa0K7aQ4cGd1teE3NYQ=="
+      }
+    }
+  },
+  "macos": {
+    "1.9.0": {
+      "offer": "window",
+      "recipe": [
+        "full:macos-1.9.0"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v1.9.0/CustodyComms-1.9.0-mac-arm64-update.zip",
+        "name": "CustodyComms-1.9.0-mac-arm64-update.zip",
+        "size": 133471616,
+        "sha256": "7124de745ed766c3b9c11bd5e77e2daaff8e36188deb4541f440d4989b9709c7",
+        "sha512": "mZupH55cpbVacE/DVFmpUIMXIST2wqzQo/mHzADXMb9EcORcRQhTS8acvHevD5FeCBp9QgcTU0bxgD5Scl+D9w=="
+      }
+    },
+    "2.0.0": {
+      "offer": "header-button",
+      "recipe": [
+        "full:macos-1.9.0",
+        "zip:2.0.0"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.0/CustodyComms-2.0.0-mac-arm64-update.zip",
+        "name": "CustodyComms-2.0.0-mac-arm64-update.zip",
+        "size": 165907159,
+        "sha256": "5f85e96aec02f96ee4ea77d8ac250333b68fa02b15155daf9f21fd2205c86a3f",
+        "sha512": "G8KJJN+eeUj+YqxrgfuQ+NWad1tBHiBzPVPl5XPYCGk2crOZykxQuUd+IJgJxvHgShkVr0AQpeOxLwnYxDtXzQ=="
+      }
+    },
+    "2.0.1": {
+      "offer": "header-button",
+      "recipe": [
+        "full:macos-1.9.0",
+        "zip:2.0.1"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.1/CustodyComms-2.0.1-mac-arm64-update.zip",
+        "name": "CustodyComms-2.0.1-mac-arm64-update.zip",
+        "size": 166169456,
+        "sha256": "2906e965d571d0f48da59c0881c6f6068b876d132e8536a2605adc24212a1979",
+        "sha512": "wn5X6r+izfa08MZr40fH0nTDfdrdFlRpYOWE6FZE+e07NarLdb4/MjIxnux8IlOHLLA7XSzx+j/IR2mX61K6gg=="
+      }
+    },
+    "2.0.3": {
+      "offer": "header-button",
+      "recipe": [
+        "full:macos-1.9.0",
+        "zip:2.0.3"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.3/CustodyComms-2.0.3-mac-arm64-update.zip",
+        "name": "CustodyComms-2.0.3-mac-arm64-update.zip",
+        "size": 166225976,
+        "sha256": "b7b13372c845c6fa8471f6590dc38b26134600956705500e4d020e97068f9795",
+        "sha512": "LAxM3h9bBtIXU7UexkrjcdsXsqQuIchsD68Od/KnG3yNey9FliLIgA6BqVKO6+QEuk1sap4CEHKczP2AwJBsqQ=="
+      }
+    },
+    "2.0.4": {
+      "offer": "header-button",
+      "recipe": [
+        "full:macos-1.9.0",
+        "zip:2.0.4"
+      ],
+      "update": {
+        "url": "https://github.com/CustodyComms/CustodyComms-release-binaries/releases/download/v2.0.4/CustodyComms-2.0.4-mac-arm64-update.zip",
+        "name": "CustodyComms-2.0.4-mac-arm64-update.zip",
+        "size": 178270727,
+        "sha256": "23ae81a3627745f0439bce349f0ac00de263f8ec5df3a5d5f876aa729c4ee3bf",
+        "sha512": "lF1ueOTLQMP07d+i2eoRJeLK33vWiL1WURH02s2nWEDjpWrdtU+fgKmcNzRmlnvvX664f24J1II6Qp3vgtNy0g=="
+      }
+    }
+  }
+}

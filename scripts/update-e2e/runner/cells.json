@@ -1,0 +1,351 @@
+{
+ "format": "cc-update-e2e-cells/1",
+ "cells": [
+  {
+   "id": "win-control",
+   "platform": "windows",
+   "from": "2.0.3",
+   "path": "control",
+   "kind": "control",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-from-1.9.0",
+   "platform": "windows",
+   "from": "1.9.0",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-from-2.0.0",
+   "platform": "windows",
+   "from": "2.0.0",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-from-2.0.1",
+   "platform": "windows",
+   "from": "2.0.1",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-from-2.0.2",
+   "platform": "windows",
+   "from": "2.0.2",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-from-2.0.3",
+   "platform": "windows",
+   "from": "2.0.3",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-from-2.0.4",
+   "platform": "windows",
+   "from": "2.0.4",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-quit-from-2.0.4",
+   "platform": "windows",
+   "from": "2.0.4",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-lock",
+   "platform": "windows",
+   "from": "2.0.4",
+   "path": "lock",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-self",
+   "platform": "windows",
+   "from": "candidate",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-fresh-wizard",
+   "platform": "windows",
+   "from": "none",
+   "path": "fresh-wizard",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-old-wizard-open",
+   "platform": "windows",
+   "from": "2.0.3",
+   "path": "old-wizard-open",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-click-permachine-from-2.0.4",
+   "platform": "windows",
+   "from": "2.0.4",
+   "path": "click-permachine",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-click-from-1.9.0",
+   "platform": "macos",
+   "from": "1.9.0",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-quit-from-1.9.0",
+   "platform": "macos",
+   "from": "1.9.0",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-click-from-2.0.0",
+   "platform": "macos",
+   "from": "2.0.0",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-quit-from-2.0.0",
+   "platform": "macos",
+   "from": "2.0.0",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-click-from-2.0.1",
+   "platform": "macos",
+   "from": "2.0.1",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-quit-from-2.0.1",
+   "platform": "macos",
+   "from": "2.0.1",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-click-from-2.0.3",
+   "platform": "macos",
+   "from": "2.0.3",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-quit-from-2.0.3",
+   "platform": "macos",
+   "from": "2.0.3",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-click-from-2.0.4",
+   "platform": "macos",
+   "from": "2.0.4",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-quit-from-2.0.4",
+   "platform": "macos",
+   "from": "2.0.4",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-self-click",
+   "platform": "macos",
+   "from": "candidate",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-self-quit",
+   "platform": "macos",
+   "from": "candidate",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-self-close",
+   "platform": "macos",
+   "from": "candidate",
+   "path": "close",
+   "kind": "required",
+   "variants": [
+    "A"
+   ]
+  },
+  {
+   "id": "mac-self-noclose",
+   "platform": "macos",
+   "from": "candidate",
+   "path": "noclose",
+   "kind": "required",
+   "variants": [
+    "A"
+   ]
+  },
+  {
+   "id": "live-win-click-from-2.0.4",
+   "platform": "windows",
+   "from": "2.0.4",
+   "path": "click",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ],
+   "mode": "live"
+  },
+  {
+   "id": "live-mac-quit-from-2.0.4",
+   "platform": "macos",
+   "from": "2.0.4",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ],
+   "mode": "live"
+  }
+ ]
+}
