@@ -153,6 +153,19 @@ def feed_yml_text(original: str, mode: str, staging_repo: str = "", probe_url: s
     return "\n".join(["provider: generic", f"url: {url}", *kept]) + "\n"
 
 
+def launched_exited(plat, timeout: float, step: float, now=time.monotonic, sleep=time.sleep) -> bool:
+    """The app the gate launched has exited. Judged by that process itself (Popen.poll, which also reaps it), not
+    by scanning for the executable's path: run 45137602974 counted macOS apps as still running after they had quit
+    and Squirrel had installed the update (screen picture: no app open). Without a launched process, the scan."""
+    proc = getattr(plat, "proc", None)
+    end = now() + timeout
+    while now() < end:
+        if (proc.poll() is not None) if proc is not None else (not plat.running()):
+            return True
+        sleep(step)
+    return False
+
+
 # ── platforms ─────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -213,15 +226,32 @@ class Win:
             raise RuntimeError("precondition_failed")
         out = open(self.cache / f"app-{int(time.time())}.log", "wb")
         DIAG_FILES.append(Path(out.name))
-        return subprocess.Popen([str(exe)] + ([f"--remote-debugging-port={DEBUG_PORT}"] if debug else []), stdout=out, stderr=out)
+        self.proc = subprocess.Popen([str(exe)] + ([f"--remote-debugging-port={DEBUG_PORT}"] if debug else []), stdout=out, stderr=out)
+        return self.proc
 
-    def quit_like_a_person(self, timeout=90) -> bool:
-        self.ps("Get-Process CustodyComms -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | ForEach-Object { [void]$_.CloseMainWindow() }")
+    def close_window_ps(self, mode: str) -> int:
+        """Runs CLOSE_WINDOW_PS (mode list|close); its output (window handles, names, results) goes into the
+        encrypted diagnostics only. Exit 0 = a visible app window was found (and, for close, SC_CLOSE posted)."""
+        script = self.cache / "close-window.ps1"
+        script.write_text(CLOSE_WINDOW_PS, encoding="utf-8")
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Mode", mode],
+                           capture_output=True, text=True, timeout=120)
+        note(f"close-window {mode} rc={r.returncode} {r.stdout[-3000:]} {r.stderr[-500:]}")
+        return r.returncode
+
+    def quit_like_a_person(self, timeout=300, settle=20) -> bool:
+        """Close the app's main window the way a person does (the X button or Alt+F4 = WM_SYSCOMMAND SC_CLOSE),
+        once its window is up and has been for `settle` seconds; a second close after 90 s if it is still open,
+        as a person clicks again. Never kills: on Windows closing the window is the quit that starts the
+        install-on-quit. Bring-up run 45137602974: Process.CloseMainWindow 28 s after launch left 2.0.4 open."""
         end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if not self.running():
+        while self.close_window_ps("list") != 0 and time.monotonic() < end:
+            time.sleep(5)
+        time.sleep(settle)
+        for wait in (90, max(0.0, end - time.monotonic())):
+            self.close_window_ps("close")
+            if launched_exited(self, wait, 3):
                 return True
-            time.sleep(3)
         return False
 
     def feed_file(self) -> Path:
@@ -289,7 +319,7 @@ class Win:
         p = self.launch(debug=False)
         ok = landed.health_ok(timeout_s=1200)
         time.sleep(15)
-        self.quit_like_a_person()
+        self.quit_like_a_person(timeout=120, settle=0)
         self.kill_all()
         ff.write_text(orig, encoding="utf-8")
         if not ok:
@@ -335,16 +365,12 @@ class Mac:
     def launch(self, debug=True) -> subprocess.Popen:
         out = open(self.cache / f"app-{int(time.time())}.log", "wb")
         DIAG_FILES.append(Path(out.name))
-        return subprocess.Popen([str(self.exe)] + ([f"--remote-debugging-port={DEBUG_PORT}"] if debug else []), stdout=out, stderr=out)
+        self.proc = subprocess.Popen([str(self.exe)] + ([f"--remote-debugging-port={DEBUG_PORT}"] if debug else []), stdout=out, stderr=out)
+        return self.proc
 
     def quit_like_a_person(self, timeout=90) -> bool:
         self.sh("osascript", "-e", 'tell application "CustodyComms" to quit')
-        end = time.monotonic() + timeout
-        while time.monotonic() < end:
-            if not self.running():
-                return True
-            time.sleep(2)
-        return False
+        return launched_exited(self, timeout, 2)
 
     def close_window(self, browser) -> str:
         r = self.sh("osascript", "-e", 'tell application "System Events" to tell process "CustodyComms" to click (first button of window 1 whose subrole is "AXCloseButton")')
@@ -524,7 +550,8 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
         if path == "noclose":
             plat.close_window(browser)
             time.sleep(180)
-            return ("pass", "ok", plat.version(), extra) if plat.running() else ("fail", "exited_expected_running", plat.version(), extra)
+            still = plat.proc.poll() is None if getattr(plat, "proc", None) is not None else plat.running()
+            return ("pass", "ok", plat.version(), extra) if still else ("fail", "exited_expected_running", plat.version(), extra)
         r = drive.drive_offer(browser, want="install" if path.startswith("click") else "ready", timeout_s=900,
                               ready_probe=lambda: plat.ready_on_disk(want))
         t0 = time.time()  # processes started from here on are the reopened app, never the one under test
@@ -542,10 +569,7 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
                 time.sleep(3)
         if path == "close":
             extra["close"] = plat.close_window(browser)
-            end = time.monotonic() + 600
-            while plat.running() and time.monotonic() < end:
-                time.sleep(3)
-            if plat.running():
+            if not launched_exited(plat, 600, 3):
                 plat.snapshot("window closed, still running")
                 return "fail", "still_running_expected_exit", plat.version(), extra
         elif not plat.quit_like_a_person(timeout=300):
@@ -700,6 +724,41 @@ def lock_cells(plat, ctx, path):
         return "fail", "installer_exit_nonzero", plat.version(), {}
     ok = first_ok and plat.version() == ctx["candidate"]
     return ("pass" if ok else "fail"), ("ok" if ok else "wrong_version"), plat.version(), {"first_run_blocked": first_ok}
+
+
+CLOSE_WINDOW_PS = r"""
+param([ValidateSet('list','close')][string]$Mode = 'list')
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+Add-Type @'
+using System; using System.Runtime.InteropServices;
+public static class CcWin {
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+}
+'@
+$root = [System.Windows.Automation.AutomationElement]::RootElement
+$all = $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition)
+$cand = @()
+foreach ($w in $all) {
+  try { $p = Get-Process -Id $w.Current.ProcessId -ErrorAction Stop } catch { continue }
+  if ($p.ProcessName -ne 'CustodyComms') { continue }
+  $r = $w.Current.BoundingRectangle
+  $o = [pscustomobject]@{ Hwnd = [int64]$w.Current.NativeWindowHandle; Name = $w.Current.Name; Cls = $w.Current.ClassName;
+                          ProcId = $w.Current.ProcessId; Area = [double]($r.Width * $r.Height); Off = $w.Current.IsOffscreen }
+  $cand += $o
+  Write-Output ("window hwnd={0} pid={1} name='{2}' class={3} area={4} offscreen={5}" -f $o.Hwnd, $o.ProcId, $o.Name, $o.Cls, $o.Area, $o.Off)
+}
+foreach ($p in Get-Process CustodyComms -ErrorAction SilentlyContinue) {
+  Write-Output ("process pid={0} mainHandle={1} mainTitle='{2}'" -f $p.Id, [int64]$p.MainWindowHandle, $p.MainWindowTitle)
+}
+$main = $cand | Where-Object { -not $_.Off -and $_.Area -gt 0 } | Sort-Object Area -Descending | Select-Object -First 1
+if (-not $main) { Write-Output 'no visible app window'; exit 3 }
+if ($Mode -eq 'list') { exit 0 }
+$fg = [CcWin]::SetForegroundWindow([IntPtr]$main.Hwnd)
+$posted = [CcWin]::PostMessage([IntPtr]$main.Hwnd, 0x0112, [IntPtr]0xF060, [IntPtr]::Zero)   # WM_SYSCOMMAND, SC_CLOSE
+Write-Output ("close hwnd={0} foreground={1} posted={2}" -f $main.Hwnd, $fg, $posted)
+exit 0
+"""
 
 
 FRESH_WIZARD_PS = r"""
