@@ -3,9 +3,13 @@ name: Update gate
 # Installs each published version of the desktop app on a disposable runner, lets that version's own updater
 # find, download and install the candidate from the staging release, and records whether it landed.
 #
-# It holds no secrets and writes nothing anywhere. Its only outputs are a plain receipt (versions, hashes, cell
-# results, timings) and a diagnostics file encrypted to a key that is not on GitHub. The log shows step names,
-# cell ids and results only.
+# It holds no secrets and writes nothing anywhere. Its only outputs are plain receipts (versions, hashes, cell
+# results, timings) and diagnostics encrypted to a key that is not on GitHub. The log shows step names, cell ids
+# and results only.
+#
+# Shape: one job lists the cells; every cell runs in its own job (its own machine, its own time cap, its own
+# receipt uploaded even when the cell is cancelled); one job per platform, under the fixed names the publish step
+# reads, merges the cell receipts into that platform's single receipt and fails unless every cell passed.
 #
 # mode: gate  = every cell, against the staging release (the only mode a release can rely on)
 #       live  = the after-publish cells, against the real feeds with unmodified apps
@@ -42,12 +46,42 @@ env:
   GATE_MAC_VARIANT: ${{ inputs.mac_variant || 'A' }}
   GATE_ONLY: ${{ inputs.only || '' }}
   PYTHONUNBUFFERED: '1'
+  # Each cell stops itself at this many seconds, writes its receipt and exits; the job cap is 15 minutes above it.
+  GATE_CELL_CAP_S: '3300'
 
 jobs:
-  windows:
-    name: Update gate, Windows x64
+  plan:
+    name: Update gate, cells
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      windows: ${{ steps.plan.outputs.windows }}
+      macos: ${{ steps.plan.outputs.macos }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: List the cells
+        id: plan
+        shell: bash
+        run: python scripts/update-e2e/runner/plan_cells.py --mode "$GATE_MODE" --mac-variant "$GATE_MAC_VARIANT" --only "$GATE_ONLY" >> "$GITHUB_OUTPUT"
+
+  windows-cell:
+    name: Update cell (Windows) ${{ matrix.cell }}
+    needs: plan
+    if: needs.plan.outputs.windows != '[]'
     runs-on: windows-2022
-    timeout-minutes: 340
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        cell: ${{ fromJSON(needs.plan.outputs.windows) }}
+    env:
+      GATE_CELL: ${{ matrix.cell }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -70,25 +104,34 @@ jobs:
         run: |
           python scripts/update-e2e/runner/blackhole.py apply
           if ($LASTEXITCODE -ne 0) { throw "an analytics host is still reachable" }
-      - name: Run the cells
+      - name: Run the cell
         shell: pwsh
         run: |
-          python scripts/update-e2e/runner/run_cells.py --platform windows --mac-variant "$env:GATE_MAC_VARIANT" --mode "$env:GATE_MODE" --bind "$env:RUNNER_TEMP/gate-run.json" --work "$env:RUNNER_TEMP/gate" --receipt update-e2e-receipt-windows.json --diag update-e2e-diag-windows.enc --only "$env:GATE_ONLY"
-          if ($LASTEXITCODE -ne 0) { throw "a cell did not pass" }
+          python scripts/update-e2e/runner/run_cells.py --platform windows --mac-variant "$env:GATE_MAC_VARIANT" --mode "$env:GATE_MODE" --bind "$env:RUNNER_TEMP/gate-run.json" --work "$env:RUNNER_TEMP/gate" --receipt "update-e2e-cell-$env:GATE_CELL.json" --diag "update-e2e-diag-$env:GATE_CELL.enc" --only "$env:GATE_CELL" --cell-cap "$env:GATE_CELL_CAP_S"
+          if ($LASTEXITCODE -ne 0) { throw "the cell did not pass" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
-          name: update-e2e-receipt-windows
+          name: update-e2e-cell-windows-${{ matrix.cell }}
           path: |
-            update-e2e-receipt-windows.json
-            update-e2e-diag-windows.enc
+            update-e2e-cell-*.json
+            update-e2e-diag-*.enc
           retention-days: 30
           if-no-files-found: warn
 
-  macos:
-    name: Update gate, macOS Apple Silicon
+  macos-cell:
+    name: Update cell (macOS) ${{ matrix.cell }}
+    needs: plan
+    if: needs.plan.outputs.macos != '[]'
     runs-on: macos-26
-    timeout-minutes: 300
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        cell: ${{ fromJSON(needs.plan.outputs.macos) }}
+    env:
+      GATE_CELL: ${{ matrix.cell }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -108,18 +151,99 @@ jobs:
       - name: Block analytics hosts
         shell: bash
         run: python scripts/update-e2e/runner/blackhole.py apply
-      - name: Run the cells
+      - name: Run the cell
         shell: bash
         run: >-
           python scripts/update-e2e/runner/run_cells.py --platform macos --mac-variant "$GATE_MAC_VARIANT"
           --mode "$GATE_MODE" --bind "$RUNNER_TEMP/gate-run.json" --work "$RUNNER_TEMP/gate"
-          --receipt update-e2e-receipt-macos.json --diag update-e2e-diag-macos.enc --only "$GATE_ONLY"
+          --receipt "update-e2e-cell-$GATE_CELL.json" --diag "update-e2e-diag-$GATE_CELL.enc"
+          --only "$GATE_CELL" --cell-cap "$GATE_CELL_CAP_S"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: update-e2e-cell-macos-${{ matrix.cell }}
+          path: |
+            update-e2e-cell-*.json
+            update-e2e-diag-*.enc
+          retention-days: 30
+          if-no-files-found: warn
+
+  windows:
+    name: Update gate, Windows x64
+    needs: [plan, windows-cell]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Bind this run to its source commit
+        shell: bash
+        run: python scripts/update-e2e/runner/bind.py --out "$RUNNER_TEMP/gate-run.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true  # a cell whose job left nothing is recorded by the merge as cell_job_lost
+        with:
+          pattern: update-e2e-cell-windows-*
+          path: cells
+          merge-multiple: true
+      - name: Merge the cell receipts
+        shell: bash
+        env:
+          GATE_CELLS: ${{ needs.plan.outputs.windows }}
+        run: >-
+          python scripts/update-e2e/runner/merge_receipts.py --platform windows --mac-variant "$GATE_MAC_VARIANT"
+          --mode "$GATE_MODE" --only "$GATE_ONLY" --bind "$RUNNER_TEMP/gate-run.json" --cells-dir cells
+          --planned "$GATE_CELLS" --receipt update-e2e-receipt-windows.json --diag-out diag
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: update-e2e-receipt-windows
+          path: |
+            update-e2e-receipt-windows.json
+            diag/update-e2e-diag-*.enc
+          retention-days: 30
+          if-no-files-found: warn
+
+  macos:
+    name: Update gate, macOS Apple Silicon
+    needs: [plan, macos-cell]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+      - name: Bind this run to its source commit
+        shell: bash
+        run: python scripts/update-e2e/runner/bind.py --out "$RUNNER_TEMP/gate-run.json"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true  # a cell whose job left nothing is recorded by the merge as cell_job_lost
+        with:
+          pattern: update-e2e-cell-macos-*
+          path: cells
+          merge-multiple: true
+      - name: Merge the cell receipts
+        shell: bash
+        env:
+          GATE_CELLS: ${{ needs.plan.outputs.macos }}
+        run: >-
+          python scripts/update-e2e/runner/merge_receipts.py --platform macos --mac-variant "$GATE_MAC_VARIANT"
+          --mode "$GATE_MODE" --only "$GATE_ONLY" --bind "$RUNNER_TEMP/gate-run.json" --cells-dir cells
+          --planned "$GATE_CELLS" --receipt update-e2e-receipt-macos.json --diag-out diag
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: update-e2e-receipt-macos
           path: |
             update-e2e-receipt-macos.json
-            update-e2e-diag-macos.enc
+            diag/update-e2e-diag-*.enc
           retention-days: 30
           if-no-files-found: warn

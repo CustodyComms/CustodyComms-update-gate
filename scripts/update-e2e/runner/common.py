@@ -45,6 +45,8 @@ REASONS = frozenset({
     "setup_window_seen", "wrong_version", "not_reopened", "reopened_unexpectedly", "reopened_exited",
     "arrival_record_missing", "health_failed", "trace_mismatch", "control_no_defect", "control_no_window",
     "still_running_expected_exit", "exited_expected_running", "reset_failed", "unsupported_on_platform", "error",
+    # bring-up 23 Nov: an inconclusive cell says which step it stopped at
+    "update_never_ready", "offer_not_opened", "cell_timeout", "cell_job_lost",
 })
 
 
@@ -158,3 +160,74 @@ def decrypt_bundle(enc: Path, private_pem: bytes) -> dict[str, bytes]:
                        padding.OAEP(mgf=padding.MGF1(algorithm=hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
     plain = AESGCM(key).decrypt(base64.b64decode(doc["nonce"]), base64.b64decode(doc["ciphertext"]), None)
     return {k: base64.b64decode(v) for k, v in json.loads(plain).items()}
+
+
+# ── one receipt per platform, merged from the per-cell jobs ───────────────────────────────────────
+
+BIND_KEYS = ("variant", "gateRepo", "gateCommit", "sourceCommit", "gateFilesHash", "runId", "runAttempt",
+             "stagingRepo", "stagingTag")
+SHARED_KEYS = ("candidateVersion", "probeVersion", "inventorySha256")
+
+
+def plan(cells_doc: dict, mode: str, mac_variant: str, only: str) -> dict:
+    """The cell ids each platform's matrix runs. `only` keeps the listed ids (bring-up); unknown ids are dropped,
+    so nothing a dispatcher types reaches a job but a known cell id. pin mode is one job per platform."""
+    if mode == "pin":
+        return {p: ["pin"] for p in PLATFORMS}
+    wanted = {x.strip() for x in only.split(",") if x.strip()}
+    out = {}
+    for p in PLATFORMS:
+        ids = [c["id"] for c in cells_for(cells_doc, p, mac_variant) if c.get("mode", "gate") == mode]
+        out[p] = [i for i in ids if not wanted or i in wanted]
+    return out
+
+
+def merge_receipts(cell_receipts: list[dict], *, planned: list[str], bind: dict, platform: str, mode: str,
+                   mac_variant: str, only: str, cells_doc: dict, finished_at: str) -> dict:
+    """The platform receipt, the same shape a single job wrote before (cc-update-e2e-receipt/1). Every planned cell
+    appears once, in plan order: from its own job's receipt when that receipt is bound to this run, else
+    `not_run` / `cell_job_lost`. A cell receipt from another run, commit or staged inventory is ignored (and its
+    cell is lost), never trusted."""
+    by_cell = {c["id"]: c for c in cells_doc["cells"]}
+    receipt = {"format": RECEIPT_FORMAT, "platform": platform, "job": JOB_NAMES[platform], "mode": mode,
+               "macVariant": mac_variant, "only": only or None, **{k: bind.get(k) for k in BIND_KEYS},
+               "cells": []}
+    got: dict[str, dict] = {}
+    shared: dict[str, object] = {}
+    files: dict[str, dict] = {}
+    starts = []
+    for r in cell_receipts:
+        if r.get("format") != RECEIPT_FORMAT or r.get("platform") != platform or r.get("mode") != mode:
+            continue
+        if any(r.get(k) != bind.get(k) for k in ("sourceCommit", "gateFilesHash", "runId", "gateCommit")):
+            continue
+        if r.get("macVariant") != mac_variant:
+            continue
+        clash = any(k in shared and r.get(k) != shared[k] for k in SHARED_KEYS if r.get(k) is not None)
+        if clash:
+            continue
+        for k in SHARED_KEYS:
+            if r.get(k) is not None:
+                shared.setdefault(k, r.get(k))
+        for f in r.get("candidateFiles") or []:
+            if f.get("name") in files and files[f["name"]] != f:
+                shared["_files_clash"] = True
+            files.setdefault(f.get("name"), f)
+        if r.get("startedAt"):
+            starts.append(r["startedAt"])
+        for c in r.get("cells") or []:
+            if c.get("id") in planned and c.get("id") not in got:
+                got[c["id"]] = c
+    for cid in planned:
+        if cid in got:
+            receipt["cells"].append(got[cid])
+        else:
+            c = by_cell.get(cid, {"id": cid, "from": None, "path": None, "kind": "required"})
+            rec = new_cell(c)
+            rec.update(detail="cell_job_lost")
+            receipt["cells"].append(rec)
+    receipt.update({k: shared.get(k) for k in SHARED_KEYS})
+    receipt["candidateFiles"] = [] if shared.get("_files_clash") else sorted(files.values(), key=lambda f: f["name"])
+    receipt["startedAt"] = min(starts) if starts else None
+    receipt["finishedAt"] = finished_at
+    return receipt

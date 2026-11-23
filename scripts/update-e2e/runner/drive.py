@@ -7,8 +7,8 @@ behind another layer is never pressed).
 One exception, used only when the version's header button cannot exist: 2.0.0 to 2.0.4 mount it only into the
 signed-in screen's header, and a test machine is signed out. Once the update is ready on disk (Squirrel's staged copy
 on macOS, the finished download on Windows) and no header button is on any page, the driver calls the one function the
-header button itself calls, `update.openReady()`, exposed by every such version, and records `header: bypassed`. The
-What's New buttons are still pressed with the mouse.
+header button itself calls, `api.update.openReady()`, exposed by every such version, and records `header: bypassed`.
+The What's New buttons are still pressed with the mouse.
 
 The offer arrives one of two ways, by version:
   window         a "What's New" window opens by itself: press "Download & Install", wait, press "Restart & Install".
@@ -79,8 +79,9 @@ class Browser:
         finally:
             ws.close()
 
-    def evaluate(self, page: dict, expr: str):
-        res = self._call(page, "Runtime.evaluate", {"expression": expr, "returnByValue": True})
+    def evaluate(self, page: dict, expr: str, await_promise: bool = False):
+        res = self._call(page, "Runtime.evaluate", {"expression": expr, "returnByValue": True,
+                                                    "awaitPromise": await_promise})
         return (res.get("result") or {}).get("value")
 
     def click(self, page: dict, x: float, y: float) -> None:
@@ -111,7 +112,13 @@ def wait_for_debug_port(browser, timeout_s: float, sleep=time.sleep, now=time.mo
     return False
 
 
-OPEN_READY_JS = "(function(){ const u = window.update; if (u && typeof u.openReady === 'function') { u.openReady(); return true; } return false; })()"
+# Bring-up run 45097794033: the function lives at window.api.update (preload `exposeInMainWorld('api', {update: ...})`
+# in every 2.0.x); the first version looked at window.update and never opened anything. Returns one short word.
+OPEN_READY_JS = ("(async function(){ const u = (window.api && window.api.update) || window.update;"
+                 " if (!u || typeof u.openReady !== 'function') return 'missing';"
+                 " try { const r = await u.openReady(); return (r && r.success) ? 'opened'"
+                 " : ((r && r.code === 'NOT_READY') ? 'not_ready' : 'refused'); } catch (e) { return 'error'; } })()")
+OPEN_READY_WORDS = ("missing", "opened", "not_ready", "refused", "error")
 
 
 def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=time.monotonic,
@@ -123,10 +130,12 @@ def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=t
     `ready_probe()`: True once the update is ready on disk. want="ready" then needs no button at all; want="install"
     with no header button on any page then opens the ready window the way the header button does (`bypassed`).
     Returns {"state": "installed_clicked"|"ready"|"timeout", "header": "clicked"|"seen"|"not_clickable"|"absent"|
-             "bypassed", "download_clicked": bool, "seen_window": bool}."""
+             "bypassed", "download_clicked": bool, "seen_window": bool, "ready_on_disk": bool,
+             "open_ready": "not_tried"|one of OPEN_READY_WORDS}."""
     if want not in ("install", "ready"):
         raise ValueError(want)
-    out = {"state": "timeout", "header": "absent", "download_clicked": False, "seen_window": False}
+    out = {"state": "timeout", "header": "absent", "download_clicked": False, "seen_window": False,
+           "ready_on_disk": False, "open_ready": "not_tried"}
     last_header_click = last_bypass = -1e9
     end = now() + timeout_s
     while now() < end:
@@ -175,18 +184,24 @@ def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=t
                 ready = bool(ready_probe())
             except Exception:
                 ready = False
+            if ready:
+                out["ready_on_disk"] = True
             if ready and want == "ready":
                 out["state"] = "ready"
                 return out
             if ready and not out["seen_window"] and now() - last_bypass > 30:
+                last_bypass = now()
                 for page in pages:
                     try:
-                        if browser.evaluate(page, OPEN_READY_JS):
-                            out["header"] = "bypassed"
-                            last_bypass = now()
-                            break
+                        word = browser.evaluate(page, OPEN_READY_JS, await_promise=True)
                     except Exception:
-                        continue
+                        word = "error"
+                    word = word if word in OPEN_READY_WORDS else "error"
+                    if out["open_ready"] in ("not_tried", "missing", "error") or word == "opened":
+                        out["open_ready"] = word
+                    if word == "opened":
+                        out["header"] = "bypassed"
+                        break
         sleep(3)
     return out
 

@@ -164,9 +164,9 @@ class Win:
     def __init__(self, pins, cache):
         self.pins, self.cache = pins, cache
 
-    def ps(self, script: str, timeout=900) -> subprocess.CompletedProcess:
+    def ps(self, script: str, timeout=900, keep=400) -> subprocess.CompletedProcess:
         r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=timeout)
-        note(f"ps rc={r.returncode} {r.stdout[-400:]} {r.stderr[-400:]}")
+        note(f"ps rc={r.returncode} {r.stdout[-keep:]} {r.stderr[-400:]}")
         return r
 
     def install(self) -> dict | None:
@@ -227,6 +227,13 @@ class Win:
     def feed_file(self) -> Path:
         i = self.install()
         return Path(i["location"]) / "resources" / "app-update.yml"
+
+    def snapshot(self, why: str) -> None:
+        """Into the encrypted diagnostics only: what is running and which windows are open."""
+        note(f"snapshot: {why}")
+        self.ps("Get-Process | Where-Object { $_.ProcessName -match 'CustodyComms|Setup|Un_A|Au_' } | "
+                "Select-Object Id, ProcessName, MainWindowTitle, StartTime | Format-Table -AutoSize | Out-String -Width 300",
+                keep=8000)
 
     def ready_on_disk(self, want: str) -> bool:
         """The updater finished downloading `want`: its pending folder names the installer in update-info.json and
@@ -302,9 +309,9 @@ class Mac:
         self.pins, self.cache = pins, cache
         self.snap = cache / "snap"
 
-    def sh(self, *args, timeout=900, check=False) -> subprocess.CompletedProcess:
+    def sh(self, *args, timeout=900, check=False, keep=300) -> subprocess.CompletedProcess:
         r = subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
-        note(f"{args[0]} rc={r.returncode} {r.stdout[-300:]} {r.stderr[-300:]}")
+        note(f"{args[0]} rc={r.returncode} {r.stdout[-keep:]} {r.stderr[-300:]}")
         if check and r.returncode != 0:
             raise RuntimeError("error")
         return r
@@ -363,6 +370,16 @@ class Mac:
         return any(p.name.endswith(".plist") for p in d.glob("*"))
 
     STAGE_SETTLE_S = 30
+
+    def snapshot(self, why: str) -> None:
+        """Into the encrypted diagnostics only: the app's processes, Squirrel's folder and a screen picture."""
+        note(f"snapshot: {why}")
+        self.sh("ps", "-axo", "pid,ppid,etime,stat,command", keep=20000)
+        self.sh("ls", "-laR", str(self.caches[1]), keep=6000)
+        shot = self.cache / f"screen-{int(time.time())}.png"
+        self.sh("screencapture", "-x", str(shot))
+        if shot.is_file():
+            DIAG_FILES.append(shot)
 
     def ready_on_disk(self, want: str, now=time.monotonic) -> bool:
         """Squirrel's unpacked copy has been there for STAGE_SETTLE_S. Bring-up run 45087190217: the copy appears
@@ -508,13 +525,15 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
             plat.close_window(browser)
             time.sleep(180)
             return ("pass", "ok", plat.version(), extra) if plat.running() else ("fail", "exited_expected_running", plat.version(), extra)
-        r = drive.drive_offer(browser, want="install" if path.startswith("click") else "ready", timeout_s=1500,
+        r = drive.drive_offer(browser, want="install" if path.startswith("click") else "ready", timeout_s=900,
                               ready_probe=lambda: plat.ready_on_disk(want))
         t0 = time.time()  # processes started from here on are the reopened app, never the one under test
         extra["header"] = r["header"]
+        extra["ready_on_disk"] = r.get("ready_on_disk", False)
+        if r.get("open_ready", "not_tried") != "not_tried":
+            extra["open_ready"] = r["open_ready"]
         if r["state"] == "timeout":
-            reason = "ready_button_not_clickable" if r["header"] == "not_clickable" else "offer_timeout"
-            return "inconclusive", reason, plat.version(), extra
+            return "inconclusive", timeout_reason(r, path), plat.version(), extra
         if path.startswith("click"):
             return after_click(plat, ctx, t0, want, frm, watch, extra)
         if plat.name == "macos":
@@ -527,8 +546,10 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
             while plat.running() and time.monotonic() < end:
                 time.sleep(3)
             if plat.running():
+                plat.snapshot("window closed, still running")
                 return "fail", "still_running_expected_exit", plat.version(), extra
-        elif not plat.quit_like_a_person(timeout=600):
+        elif not plat.quit_like_a_person(timeout=300):
+            plat.snapshot("asked to quit, still running")
             return "fail", "still_running_expected_exit", plat.version(), extra
         return after_quit(plat, ctx, t0, want, frm, watch, extra)
     finally:
@@ -537,12 +558,27 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
         plat.kill_all()
 
 
+def timeout_reason(r: dict, path: str) -> str:
+    """Which step an offer that timed out stopped at (bring-up run 45097794033 had only `offer_timeout`)."""
+    if r.get("header") == "not_clickable":
+        return "ready_button_not_clickable"
+    if not r.get("ready_on_disk") and not r.get("seen_window") and r.get("header") in ("absent", None):
+        return "update_never_ready"
+    if path.startswith("click") and r.get("ready_on_disk") and not r.get("seen_window"):
+        return "offer_not_opened"
+    return "offer_timeout"
+
+
 def after_click(plat, ctx, t0, want, frm, watch, extra):
-    end = time.monotonic() + 900
+    end = time.monotonic() + 600
     while plat.version() != want and time.monotonic() < end:
         time.sleep(5)
     got = plat.version()
+    if watch:
+        extra["setup_window"] = "seen" if watch.seen else "not_seen"
     if got != want or plat.files_version() != want:
+        if plat.name == "windows":
+            plat.snapshot("after the click, the version did not change")
         return "fail", "wrong_version", got, extra
     exe = plat.exe if plat.name == "macos" else plat.app_exe()
     proc = landed.wait_started(str(exe), t0 + 1, 180)
@@ -555,7 +591,7 @@ def after_click(plat, ctx, t0, want, frm, watch, extra):
 
 
 def after_quit(plat, ctx, t0, want, frm, watch, extra):
-    end = time.monotonic() + 900
+    end = time.monotonic() + 600
     while plat.version() != want and time.monotonic() < end:
         time.sleep(5)
     got = plat.version()
@@ -735,6 +771,63 @@ def pin_mode(pins: dict, platform: str, cache: Path) -> int:
     return 1
 
 
+class Flusher:
+    """Writes the receipt and the encrypted diagnostics after every attempt, so a cancelled or capped job still
+    leaves both behind. With a cap, a watchdog ends the run at the cap: the cell in progress becomes
+    `inconclusive` / `cell_timeout`, both files are written, and the process exits before the job's own limit."""
+
+    def __init__(self, receipt: dict, receipt_path: Path, diag_path: Path, work: Path):
+        self.receipt, self.receipt_path, self.diag_path, self.work = receipt, receipt_path, diag_path, work
+        self.lock = threading.Lock()
+        self.staging = None
+        self.current: tuple[dict, float] | None = None
+
+    def flush(self) -> None:
+        with self.lock:
+            self._write()
+
+    def _write(self) -> None:
+        if self.staging is not None:
+            self.receipt["candidateFiles"] = sorted(self.staging.files.values(), key=lambda f: f["name"])
+        self.receipt["finishedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        tmp = self.receipt_path.with_name(self.receipt_path.name + ".tmp")
+        tmp.write_text(json.dumps(self.receipt, indent=1) + "\n", encoding="utf-8")
+        os.replace(tmp, self.receipt_path)
+        log = self.work / "driver.log"
+        log.write_text("\n".join(LOG) + "\n", encoding="utf-8")
+        try:
+            common.encrypt_bundle([log, *DIAG_FILES], self.diag_path)
+        except Exception:  # noqa: BLE001
+            say("diagnostics: not written")
+
+    def cap(self, seconds: int, exit=os._exit) -> threading.Thread:
+        def fire():
+            time.sleep(seconds)
+            got = self.lock.acquire(timeout=60)
+            try:
+                if self.current is not None:
+                    rec, started = self.current
+                    if rec.pop("_open", None):
+                        if rec["result"] == "not_run":
+                            common.finish_cell(rec, "inconclusive", "cell_timeout", None, started)
+                        else:  # a retry hit the cap: the first attempt's result is the evidence, kept as it was
+                            note(f"{rec['id']}: attempt {rec['attempts']} hit the cell cap")
+                            rec["attempts"] -= 1
+                note("cell cap reached")
+                self._write()
+                for c in self.receipt["cells"]:
+                    say(f"cell {c['id']}: {c['result']} {c['detail']} ({c['seconds']} s, attempt {c['attempts']})")
+                say("overall: not pass")
+            finally:
+                if got:
+                    self.lock.release()
+            exit(1)
+
+        th = threading.Thread(target=fire, daemon=True)
+        th.start()
+        return th
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--platform", required=True, choices=common.PLATFORMS)
@@ -745,6 +838,7 @@ def main(argv=None) -> int:
     ap.add_argument("--receipt", required=True)
     ap.add_argument("--diag", required=True)
     ap.add_argument("--only", default="", help="comma-separated cell ids (bring-up); such a receipt never clears a release")
+    ap.add_argument("--cell-cap", type=int, default=0, help="seconds; the run ends itself here with its receipt written")
     a = ap.parse_args(argv)
     work = Path(a.work)
     work.mkdir(parents=True, exist_ok=True)
@@ -755,13 +849,25 @@ def main(argv=None) -> int:
     receipt = {
         "format": common.RECEIPT_FORMAT, "platform": a.platform, "job": common.JOB_NAMES[a.platform],
         "mode": a.mode, "macVariant": a.mac_variant, "only": a.only or None, "startedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        **{k: bind.get(k) for k in ("variant", "gateRepo", "gateCommit", "sourceCommit", "gateFilesHash", "runId",
-                                    "runAttempt", "stagingRepo", "stagingTag")},
+        **{k: bind.get(k) for k in common.BIND_KEYS},
         "cells": [],
     }
+    cells = [c for c in common.cells_for(common.load_json(common.CELLS), a.platform, a.mac_variant)
+             if c.get("mode", "gate") == a.mode]
+    if a.only:
+        wanted = {x.strip() for x in a.only.split(",") if x.strip()}
+        cells = [c for c in cells if c["id"] in wanted]
+    recs = [common.new_cell(c) for c in cells]
+    receipt["cells"] = recs
+    fl = Flusher(receipt, Path(a.receipt), Path(a.diag), work)
+    fl.flush()
+    if a.cell_cap > 0:
+        fl.cap(a.cell_cap)
     rc = 1
+    run_started = time.monotonic()
     try:
         staging = Staging(bind, work)
+        fl.staging = staging
         receipt.update(candidateVersion=staging.inv["candidateVersion"], probeVersion=staging.inv.get("probeVersion"),
                        inventorySha256=staging.inventory_sha256)
         ctx = {"candidate": staging.inv["candidateVersion"], "probe": staging.inv.get("probeVersion"),
@@ -770,18 +876,18 @@ def main(argv=None) -> int:
                "staging": staging, "staging_repo": bind["stagingRepo"], "mode": a.mode, "cache": work,
                "newest_shipped": {p: max((v for v in pins[p] if "recipe" in pins[p][v]), key=_vkey) for p in common.PLATFORMS}}
         plat = Win(pins, work) if a.platform == "windows" else Mac(pins, work)
-        cells = [c for c in common.cells_for(common.load_json(common.CELLS), a.platform, a.mac_variant)
-                 if c.get("mode", "gate") == a.mode]
-        if a.only:
-            wanted = {x.strip() for x in a.only.split(",") if x.strip()}
-            cells = [c for c in cells if c["id"] in wanted]
         for name in [staging.candidate_asset("-update.exe" if a.platform == "windows" else "-mac-arm64-update.zip")]:
             staging.get(name)
-        for cell in cells:
-            rec = common.new_cell(cell)
+        for cell, rec in zip(cells, recs):
+            first_s = 0.0
             for attempt in (1, 2):
+                if attempt == 2 and a.cell_cap > 0 and (time.monotonic() - run_started) + first_s > a.cell_cap - 60:
+                    note(f"{cell['id']}: no time left for a second attempt")
+                    break
                 started = time.monotonic()
                 rec["attempts"] = attempt
+                rec["_open"] = True
+                fl.current = (rec, started)
                 try:
                     result, reason, got, extra = run_one(plat, cell, ctx)
                 except RuntimeError as e:
@@ -790,31 +896,37 @@ def main(argv=None) -> int:
                 except Exception as e:  # noqa: BLE001 - any crash is a non-pass, never a pass
                     note(f"{cell['id']} crashed: {type(e).__name__}: {e}")
                     result, reason, got, extra = "inconclusive", "error", None, {}
-                common.finish_cell(rec, result, reason, got, started, **extra)
-                note(f"{cell['id']} attempt {attempt}: {result} {reason}")
+                with fl.lock:
+                    rec.pop("_open", None)
+                    common.finish_cell(rec, result, reason, got, started, **extra)
+                    note(f"{cell['id']} attempt {attempt}: {result} {reason}")
+                    fl._write()
+                first_s = time.monotonic() - started
                 if result == "pass" or result == "not_run":
                     break
-            receipt["cells"].append(rec)
-            say(f"cell {rec['id']}: {rec['result']} ({rec['seconds']} s, attempt {rec['attempts']})")
-        receipt["candidateFiles"] = sorted(staging.files.values(), key=lambda f: f["name"])
+            fl.current = None
+            say(f"cell {rec['id']}: {rec['result']} {rec['detail']} ({rec['seconds']} s, attempt {rec['attempts']})")
         rc = 0 if cells and all(c["result"] == "pass" for c in receipt["cells"]) else 1
     except RuntimeError as e:
         note(f"setup refused: {e}")
         say("setup: refused")
+        word = str(e) if str(e) in common.REASONS else "error"
+        for rec in recs:
+            if rec["result"] == "not_run" and not rec.get("attempts"):
+                rec.update(result="inconclusive", detail=word)
         rc = 2
     except Exception as e:  # noqa: BLE001 - a traceback would put paths and messages in the public log
         note(f"setup crashed: {type(e).__name__}: {e}")
         say("setup: error")
+        for rec in recs:
+            if rec["result"] == "not_run" and not rec.get("attempts"):
+                rec.update(result="inconclusive", detail="error")
         rc = 2
     finally:
-        receipt["finishedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        Path(a.receipt).write_text(json.dumps(receipt, indent=1) + "\n", encoding="utf-8")
-        log = work / "driver.log"
-        log.write_text("\n".join(LOG) + "\n", encoding="utf-8")
-        try:
-            common.encrypt_bundle([log, *DIAG_FILES], Path(a.diag))
-        except Exception:  # noqa: BLE001
-            say("diagnostics: not written")
+        with fl.lock:
+            for rec in recs:
+                rec.pop("_open", None)
+            fl._write()
     say(f"overall: {'pass' if rc == 0 else 'not pass'}")
     return rc
 
