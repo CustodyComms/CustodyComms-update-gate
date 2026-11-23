@@ -220,10 +220,13 @@ class Win:
             p.kill()
             raise RuntimeError("installer_timeout")
 
-    def launch(self, debug=True) -> subprocess.Popen:
+    def launch(self, debug=True, quiet=False) -> subprocess.Popen:
         exe = self.app_exe()
         if not exe or not exe.exists():
             raise RuntimeError("precondition_failed")
+        if quiet:
+            self.proc = subprocess.Popen([str(exe)], **QUIET)
+            return self.proc
         out = open(self.cache / f"app-{int(time.time())}.log", "wb")
         DIAG_FILES.append(Path(out.name))
         self.proc = subprocess.Popen([str(exe)] + ([f"--remote-debugging-port={DEBUG_PORT}"] if debug else []), stdout=out, stderr=out)
@@ -259,8 +262,16 @@ class Win:
         return Path(i["location"]) / "resources" / "app-update.yml"
 
     def snapshot(self, why: str) -> None:
-        """Into the encrypted diagnostics only: what is running and which windows are open."""
+        """Into the encrypted diagnostics only: what is running, which windows are open, the app's own log files."""
         note(f"snapshot: {why}")
+        self.close_window_ps("list")
+        for f in sorted(self.data.glob("logs/*.log"))[:6]:
+            copy = self.cache / f"applog-{int(time.time())}-{f.name}"
+            try:
+                shutil.copy(f, copy)
+                DIAG_FILES.append(copy)
+            except OSError:
+                continue
         self.ps("Get-Process | Where-Object { $_.ProcessName -match 'CustodyComms|Setup|Un_A|Au_' } | "
                 "Select-Object Id, ProcessName, MainWindowTitle, StartTime | Format-Table -AutoSize | Out-String -Width 300",
                 keep=8000)
@@ -542,6 +553,23 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
     if watch:
         watch.start()
     try:
+        if plat.name == "windows" and path == "quit":
+            # As the installed app runs for a person: no debugging port, no redirected output (run 45160618293: the app began
+            # quitting and stalled; this takes the gate's own launch switches out of that question). Readiness is
+            # read from disk; the app's own log file goes into the diagnostics.
+            plat.launch(debug=False, quiet=True)
+            extra["debug_port"] = "not_used"
+            end = time.monotonic() + 900
+            while not plat.ready_on_disk(want) and time.monotonic() < end:
+                time.sleep(5)
+            extra["ready_on_disk"] = plat.ready_on_disk(want)
+            if not extra["ready_on_disk"]:
+                return "inconclusive", "update_never_ready", plat.version(), extra
+            t0 = time.time()
+            if not plat.quit_like_a_person(timeout=300):
+                plat.snapshot("asked to quit, still running")
+                return "fail", "still_running_expected_exit", plat.version(), extra
+            return after_quit(plat, ctx, t0, want, frm, watch, extra)
         plat.launch()
         browser = drive.Browser(DEBUG_PORT)
         if not drive.wait_for_debug_port(browser, 600):
