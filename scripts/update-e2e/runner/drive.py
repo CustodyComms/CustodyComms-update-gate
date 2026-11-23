@@ -2,7 +2,13 @@
 
 It finds buttons only by the words a person sees on them (or their accessible name) and presses them with a real
 mouse event at their centre, and only when the point under that centre is the button itself (so a button hidden
-behind another layer is never pressed). It never calls into the application's own scripts.
+behind another layer is never pressed).
+
+One exception, used only when the version's header button cannot exist: 2.0.0 to 2.0.4 mount it only into the
+signed-in screen's header, and a test machine is signed out. Once the update is ready on disk (Squirrel's staged copy
+on macOS, the finished download on Windows) and no header button is on any page, the driver calls the one function the
+header button itself calls, `update.openReady()`, exposed by every such version, and records `header: bypassed`. The
+What's New buttons are still pressed with the mouse.
 
 The offer arrives one of two ways, by version:
   window         a "What's New" window opens by itself: press "Download & Install", wait, press "Restart & Install".
@@ -105,23 +111,30 @@ def wait_for_debug_port(browser, timeout_s: float, sleep=time.sleep, now=time.mo
     return False
 
 
-def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=time.monotonic) -> dict:
+OPEN_READY_JS = "(function(){ const u = window.update; if (u && typeof u.openReady === 'function') { u.openReady(); return true; } return false; })()"
+
+
+def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=time.monotonic,
+                ready_probe=None) -> dict:
     """Take the offer to the point `want` asks for.
 
     want="install": press Restart & Install (the click path). want="ready": stop once the update is downloaded
     and ready, pressing nothing that installs (the quit and close paths).
-    Returns {"state": "installed_clicked"|"ready"|"timeout", "header": "clicked"|"not_clickable"|"absent",
-             "download_clicked": bool, "seen_window": bool}."""
+    `ready_probe()`: True once the update is ready on disk. want="ready" then needs no button at all; want="install"
+    with no header button on any page then opens the ready window the way the header button does (`bypassed`).
+    Returns {"state": "installed_clicked"|"ready"|"timeout", "header": "clicked"|"seen"|"not_clickable"|"absent"|
+             "bypassed", "download_clicked": bool, "seen_window": bool}."""
     if want not in ("install", "ready"):
         raise ValueError(want)
     out = {"state": "timeout", "header": "absent", "download_clicked": False, "seen_window": False}
-    last_header_click = -1e9
+    last_header_click = last_bypass = -1e9
     end = now() + timeout_s
     while now() < end:
         try:
             pages = browser.pages()
         except Exception:
             pages = []
+        header_on_a_page = False
         for page in pages:
             b = find_button(browser, page, INSTALL_LABEL)
             if b.get("found"):
@@ -143,6 +156,7 @@ def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=t
                 continue
             b = find_button(browser, page, HEADER_LABEL)
             if b.get("found"):
+                header_on_a_page = True
                 if not b.get("hit"):
                     if out["header"] == "absent":
                         out["header"] = "not_clickable"
@@ -156,6 +170,23 @@ def drive_offer(browser, *, want: str, timeout_s: float, sleep=time.sleep, now=t
                     browser.click(page, b["x"], b["y"])
                     out["header"] = "clicked"
                     last_header_click = now()
+        if ready_probe is not None and not header_on_a_page and out["header"] in ("absent", "bypassed"):
+            try:
+                ready = bool(ready_probe())
+            except Exception:
+                ready = False
+            if ready and want == "ready":
+                out["state"] = "ready"
+                return out
+            if ready and not out["seen_window"] and now() - last_bypass > 30:
+                for page in pages:
+                    try:
+                        if browser.evaluate(page, OPEN_READY_JS):
+                            out["header"] = "bypassed"
+                            last_bypass = now()
+                            break
+                    except Exception:
+                        continue
         sleep(3)
     return out
 

@@ -228,6 +228,17 @@ class Win:
         i = self.install()
         return Path(i["location"]) / "resources" / "app-update.yml"
 
+    def ready_on_disk(self, want: str) -> bool:
+        """The updater finished downloading `want`: its pending folder names the installer in update-info.json and
+        that installer is there (electron-updater writes update-info.json only after the download checks out)."""
+        pend = self.updater_cache / "pending"
+        try:
+            info = json.loads((pend / "update-info.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        name = str(info.get("fileName") or "")
+        return bool(name) and want in name and (pend / name).is_file()
+
     def version(self) -> str | None:
         i = self.install()
         return i["version"] if i else None
@@ -248,6 +259,7 @@ class Win:
                 if exe is None:
                     raise RuntimeError("pin_missing")
                 if not landed.win_signature_valid(exe):
+                    note(f"signature of {ref}: {landed.win_signature_status(exe)[0]}")
                     raise RuntimeError("signature_invalid")
                 if self.run_installer(exe, ["/S", "/allusers" if per_machine else "/currentuser"]) != 0:
                     raise RuntimeError("installer_exit_nonzero")
@@ -341,8 +353,17 @@ class Mac:
 
     files_version = version
 
-    def staged(self) -> bool:
-        return any(p.name.endswith(".plist") for p in self.caches[1].glob("*")) if self.caches[1].exists() else False
+    def staged(self, want: str | None = None) -> bool:
+        """Squirrel.Mac has the update: its unpacked copy of `want` (or, without a version, any ShipIt request)."""
+        d = self.caches[1]
+        if not d.exists():
+            return False
+        if want:
+            return any(landed.bundle_version(p.parents[1]) == want for p in d.glob("update.*/*.app/Contents/Info.plist"))
+        return any(p.name.endswith(".plist") for p in d.glob("*"))
+
+    def ready_on_disk(self, want: str) -> bool:
+        return self.staged(want)
 
     def build_from(self, ver: str, per_machine=False) -> None:
         if (self.snap / ver).exists():
@@ -475,7 +496,8 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
             plat.close_window(browser)
             time.sleep(180)
             return ("pass", "ok", plat.version(), extra) if plat.running() else ("fail", "exited_expected_running", plat.version(), extra)
-        r = drive.drive_offer(browser, want="install" if path.startswith("click") else "ready", timeout_s=1500)
+        r = drive.drive_offer(browser, want="install" if path.startswith("click") else "ready", timeout_s=1500,
+                              ready_probe=lambda: plat.ready_on_disk(want))
         t0 = time.time()  # processes started from here on are the reopened app, never the one under test
         extra["header"] = r["header"]
         if r["state"] == "timeout":
@@ -485,7 +507,7 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
             return after_click(plat, ctx, t0, want, frm, watch, extra)
         if plat.name == "macos":
             end = time.monotonic() + 300
-            while not plat.staged() and time.monotonic() < end:
+            while not plat.staged(want) and time.monotonic() < end:
                 time.sleep(3)
         if path == "close":
             extra["close"] = plat.close_window(browser)
@@ -538,6 +560,8 @@ def after_quit(plat, ctx, t0, want, frm, watch, extra):
 def common_checks(plat, ctx, frm, want, watch, extra):
     sig = landed.mac_signature_valid(plat.app) if plat.name == "macos" else landed.win_signature_valid(plat.app_exe())
     if not sig:
+        if plat.name == "windows":
+            note(f"signature of the landed app: {landed.win_signature_status(plat.app_exe())[0]}")
         return "fail", "signature_invalid", want, extra
     if watch and watch.seen:
         return "fail", "setup_window_seen", want, extra

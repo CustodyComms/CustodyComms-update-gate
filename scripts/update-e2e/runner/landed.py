@@ -151,10 +151,17 @@ def win_setup_window_open() -> bool:
     return r.stdout.strip() not in ("", "0")
 
 
-def win_signature_valid(exe: Path) -> bool:
+def win_signature_status(exe: Path) -> tuple[str, str]:
+    """(status word, signer subject) from Get-AuthenticodeSignature under PowerShell 7, the same call the runtime
+    proof makes on these installers. Windows PowerShell 5.1 refused the signed 2.4 GB 1.9.0 installer (bring-up)."""
     ps = f"$s = Get-AuthenticodeSignature -LiteralPath '{exe}'; \"$($s.Status)|$($s.SignerCertificate.Subject)\""
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True)
+    r = subprocess.run(["pwsh", "-NoProfile", "-Command", ps], capture_output=True, text=True)
     status, _, subject = r.stdout.strip().partition("|")
+    return status.strip(), subject.strip()
+
+
+def win_signature_valid(exe: Path) -> bool:
+    status, subject = win_signature_status(exe)
     return status == "Valid" and bool(WIN_PUBLISHER.search(subject))
 
 
