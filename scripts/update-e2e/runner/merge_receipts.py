@@ -57,7 +57,7 @@ def main(argv=None) -> int:
             shutil.copy(f, out / f.name)
     for c in receipt["cells"]:
         print(f"cell {c['id']}: {c['result']} {c['detail']} ({c['seconds']} s, attempt {c['attempts']})")
-    ok = bool(receipt["cells"]) and all(c["result"] == "pass" for c in receipt["cells"])
+    ok = common.all_blocking_passed(receipt["cells"])
     print(f"overall: {'pass' if ok else 'not pass'}")
     return 0 if ok else 1
 

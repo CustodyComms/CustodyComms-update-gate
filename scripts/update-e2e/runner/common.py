@@ -36,6 +36,13 @@ JOB_NAMES = {
 PLATFORMS = tuple(JOB_NAMES)
 MAC_VARIANTS = ("A", "B", "C")
 RESULTS = ("pass", "fail", "inconclusive", "not_run")
+BLOCKING_KINDS = ("required", "control")  # a "reported" cell is recorded and never fails a job
+
+
+def all_blocking_passed(cells: list[dict]) -> bool:
+    """True when every required or control cell passed and there is at least one. Reported cells do not count."""
+    blocking = [c for c in cells if c.get("kind", "required") in BLOCKING_KINDS]
+    return bool(blocking) and all(c["result"] == "pass" for c in blocking)
 
 # The only words a cell may carry in its `detail`. A closed list keeps free text (and with it anything an
 # application wrote) out of the plain receipt.
@@ -47,6 +54,10 @@ REASONS = frozenset({
     "still_running_expected_exit", "exited_expected_running", "reset_failed", "unsupported_on_platform", "error",
     # bring-up 23 Nov: an inconclusive cell says which step it stopped at
     "update_never_ready", "offer_not_opened", "cell_timeout", "cell_job_lost",
+    # mac-quit-during-verify
+    "verify_window_missed",
+    # win-quit-from-self
+    "backstop_exit", "quit_not_logged", "orphans",
 })
 
 

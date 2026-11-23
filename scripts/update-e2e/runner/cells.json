@@ -346,6 +346,42 @@
     "C"
    ],
    "mode": "live"
+  },
+  {
+   "id": "mac-quit-during-verify",
+   "platform": "macos",
+   "from": "2.0.4",
+   "path": "quit-during-verify",
+   "kind": "reported",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "mac-quit-during-verify-self",
+   "platform": "macos",
+   "from": "candidate",
+   "path": "quit-during-verify",
+   "kind": "reported",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
+  },
+  {
+   "id": "win-quit-from-self",
+   "platform": "windows",
+   "from": "candidate",
+   "path": "quit",
+   "kind": "required",
+   "variants": [
+    "A",
+    "B",
+    "C"
+   ]
   }
  ]
 }

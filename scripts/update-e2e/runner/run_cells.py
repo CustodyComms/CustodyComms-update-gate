@@ -220,10 +220,92 @@ class Win:
             p.kill()
             raise RuntimeError("installer_timeout")
 
+    PROC_DUMP_AT_S = (20, 60)
+
+    def proc_dump(self, label: str) -> None:
+        """Encrypted diagnostics only: every process with its parent and start time, `tasklist /v`, and whether a
+        taskkill.exe or conhost.exe is alive and under which parent. Tells a taskkill that never exits apart from a
+        main thread blocked in process creation (the 2.0.4 quit freeze)."""
+        cim = ("Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CreationDate, "
+               "ExecutablePath, CommandLine | Format-Table -AutoSize | Out-String -Width 600")
+        watch = ("Get-CimInstance Win32_Process -Filter \"Name='taskkill.exe' OR Name='conhost.exe'\" | ForEach-Object { "
+                 "$p = Get-CimInstance Win32_Process -Filter \"ProcessId=$($_.ParentProcessId)\"; "
+                 "'{0} pid={1} parent={2} ({3}) started={4} cmd={5}' -f $_.Name, $_.ProcessId, $_.ParentProcessId, "
+                 "$(if ($p) { $p.Name } else { 'gone' }), $_.CreationDate, $_.CommandLine }")
+        note(f"proc-dump {label}")
+        self.ps(watch, keep=6000)
+        self.ps(cim, keep=60000)
+        r = subprocess.run(["tasklist", "/v"], capture_output=True, text=True, timeout=120)
+        note(f"tasklist /v rc={r.returncode} {r.stdout[-30000:]}")
+
+    def dumps_after_close(self, label: str, at=None, sleep=time.sleep) -> threading.Thread:
+        """Takes proc_dump at 20 s and 60 s after a close, on its own thread so the quit's timing is untouched."""
+        def run():
+            last = 0
+            for s in (at or self.PROC_DUMP_AT_S):
+                sleep(s - last)
+                last = s
+                try:
+                    self.proc_dump(f"{label} +{s}s")
+                except Exception as e:  # noqa: BLE001 - diagnostics never break a cell
+                    note(f"proc-dump failed: {type(e).__name__}")
+
+        th = threading.Thread(target=run, daemon=True)
+        th.start()
+        return th
+
+    def main_log(self) -> Path:
+        return self.data / "logs" / "main.log"
+
+    def log_since_launch(self) -> str:
+        """The app's own main.log from the last launch on (it appends across launches)."""
+        try:
+            with open(self.main_log(), "rb") as f:
+                f.seek(getattr(self, "log_offset", 0))
+                return f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    def close_and_time(self, limit: float) -> tuple[bool, int]:
+        """One person-like close (SC_CLOSE to the visible window, after it has been up 20 s) and whether the launched
+        app exits within `limit` seconds of it. No second close, no kill."""
+        end = time.monotonic() + 300
+        while self.close_window_ps("list") != 0 and time.monotonic() < end:
+            time.sleep(5)
+        time.sleep(20)
+        t = time.monotonic()
+        self.close_window_ps("close")
+        self.dumps_after_close("after the close")
+        ok = launched_exited(self, limit, 1)
+        return ok, int(time.monotonic() - t)
+
+    def census(self, procs=None) -> list[str]:
+        """App processes left behind: CustodyComms.exe, ollama.exe or python.exe under the install or data folders,
+        and any taskkill.exe. The list goes into the diagnostics; the receipt carries its length."""
+        import psutil
+
+        roots = [str(self.data).lower(), str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "CustodyComms").lower()]
+        i = self.install()
+        if i and i.get("location"):
+            roots.append(str(i["location"]).lower())
+        names = {"custodycomms.exe", "ollama.exe", "python.exe"}
+        left = []
+        for p in (procs if procs is not None else psutil.process_iter(["name", "exe", "pid"])):
+            info = p.info if hasattr(p, "info") else p
+            name, exe = (info.get("name") or "").lower(), (info.get("exe") or "").lower()
+            if name == "taskkill.exe" or (name in names and any(r and exe.startswith(r) for r in roots)):
+                left.append(f"{name} {info.get('pid')}")
+        note(f"census: {left}")
+        return left
+
     def launch(self, debug=True, quiet=False) -> subprocess.Popen:
         exe = self.app_exe()
         if not exe or not exe.exists():
             raise RuntimeError("precondition_failed")
+        try:
+            self.log_offset = self.main_log().stat().st_size
+        except OSError:
+            self.log_offset = 0
         if quiet:
             self.proc = subprocess.Popen([str(exe)], **QUIET)
             return self.proc
@@ -251,8 +333,12 @@ class Win:
         while self.close_window_ps("list") != 0 and time.monotonic() < end:
             time.sleep(5)
         time.sleep(settle)
+        first = True
         for wait in (90, max(0.0, end - time.monotonic())):
             self.close_window_ps("close")
+            if first and settle:
+                self.dumps_after_close("after the close")
+                first = False
             if launched_exited(self, wait, 3):
                 return True
         return False
@@ -418,6 +504,16 @@ class Mac:
         if shot.is_file():
             DIAG_FILES.append(shot)
 
+    def in_verify_window(self, want: str) -> bool:
+        """The update is downloaded (electron-updater's pending zip, or Squirrel's own copy) and Squirrel has not
+        finished unpacking and verifying it: the gap mac-quit-during-verify quits in (about 3 s, bring-up run
+        45074289608)."""
+        if self.staged(want):
+            return False
+        pending = list((self.caches[0] / "pending").glob("*.zip")) if (self.caches[0] / "pending").is_dir() else []
+        ship = list(self.caches[1].glob("update.*/*.zip")) if self.caches[1].is_dir() else []
+        return bool(pending or ship)
+
     def ready_on_disk(self, want: str, now=time.monotonic) -> bool:
         """Squirrel's unpacked copy has been there for STAGE_SETTLE_S. Bring-up run 45087190217: the copy appears
         when the download lands, about 3 s before Squirrel reports it staged; quitting in that gap left the app
@@ -530,6 +626,8 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
     plat.reset()
     if path == "fresh-wizard":
         return fresh_wizard(plat, ctx)
+    if plat.name == "windows" and frm == "candidate" and path == "quit":
+        return win_quit_from_self(plat, ctx, want, extra)
     if frm == "candidate":
         # The candidate's own next hop starts from the candidate, installed over the newest shipped version the
         # way an update installs it.
@@ -575,6 +673,8 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
         if not drive.wait_for_debug_port(browser, 600):
             return "inconclusive", "debug_port_unreachable", plat.version(), extra
         extra["debug_port"] = "ok"
+        if path == "quit-during-verify":
+            return quit_during_verify(plat, want, extra)
         if path == "noclose":
             plat.close_window(browser)
             time.sleep(180)
@@ -610,6 +710,117 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
         plat.kill_all()
 
 
+QUIT_DONE_LINES = ("[Quit] child processes stopped: quitting", "[Quit] child processes not confirmed stopped: quitting")
+QUIT_BACKSTOP_LINE = "[Quit] the quit did not finish in 10 s"
+
+
+def win_quit_from_self(plat, ctx, want, extra, now=time.monotonic, sleep=time.sleep, wall=time.time) -> tuple:
+    """win-quit-from-self: the candidate, closed like a person, must quit by
+    itself and its quit-time install must land the probe. Never a kill.
+    1. land the candidate as an update does; first launch with the feed pointed nowhere; one close; exit in 60 s.
+    2. feed at the probe; launch as a person runs it; wait until the probe is ready on disk.
+    3. one close; exit in 60 s.
+    4. main.log of that launch has the normal quit line and not the backstop line; 15 s after exit no app process
+       is left; the probe lands (registered and in the files), signed."""
+    if not want or not ctx.get("probe_url"):
+        raise RuntimeError("precondition_failed")
+    plat.build_from(ctx["newest_shipped"]["windows"])
+    st = ctx["staging"]
+    if plat.run_installer(st.get(st.candidate_asset("-update.exe")), ["--updated", "/S"]) != 0:
+        raise RuntimeError("installer_exit_nonzero")
+    plat.kill_all()
+    if plat.version() != ctx["candidate"]:
+        raise RuntimeError("precondition_failed")
+    ff = plat.feed_file()
+    orig = ff.read_text(encoding="utf-8")
+    ff.write_text(feed_yml_text(orig, "nowhere"), encoding="utf-8")
+    plat.launch(debug=False, quiet=True)
+    if not landed.health_ok(timeout_s=1200):
+        raise RuntimeError("health_failed")
+    exited, secs = plat.close_and_time(60)
+    extra["first_close_s"] = secs
+    if not exited:
+        plat.snapshot("first launch of the candidate closed, still running")
+        return "fail", "still_running_expected_exit", plat.version(), extra
+    ff.write_text(feed_yml_text(orig, "probe", ctx["staging_repo"], ctx["probe_url"]), encoding="utf-8")
+    extra["feed"] = "generic-probe"
+    plat.launch(debug=False, quiet=True)
+    end = now() + 900
+    while not plat.ready_on_disk(want) and now() < end:
+        sleep(5)
+    extra["ready_on_disk"] = plat.ready_on_disk(want)
+    if not extra["ready_on_disk"]:
+        return "inconclusive", "update_never_ready", plat.version(), extra
+    exited, secs = plat.close_and_time(60)
+    extra["close_s"] = secs
+    if not exited:
+        plat.snapshot("candidate closed with the probe ready, still running")
+        return "fail", "still_running_expected_exit", plat.version(), extra
+    exit_at = wall()
+    log = plat.log_since_launch()
+    if QUIT_BACKSTOP_LINE in log:
+        plat.snapshot("the quit was ended by the backstop")
+        return "fail", "backstop_exit", plat.version(), extra
+    if not any(line in log for line in QUIT_DONE_LINES):
+        plat.snapshot("no normal quit line in main.log")
+        return "fail", "quit_not_logged", plat.version(), extra
+    sleep(max(0.0, 15 - (wall() - exit_at)))
+    left = plat.census()
+    extra["orphans"] = len(left)
+    if left:
+        plat.snapshot("processes left 15 s after the quit")
+        return "fail", "orphans", plat.version(), extra
+    end = now() + 600
+    while plat.version() != want and now() < end:
+        sleep(5)
+    got = plat.version()
+    if got != want or plat.files_version() != want:
+        plat.snapshot("the probe did not land after the quit")
+        return "fail", "wrong_version", got, extra
+    if not landed.win_signature_valid(plat.app_exe()):
+        return "fail", "signature_invalid", got, extra
+    return "pass", "ok", got, extra
+
+
+def quit_during_verify(plat, want: str, extra: dict, now=time.monotonic, sleep=time.sleep,
+                       quit_timeout: float = 120) -> tuple:
+    """mac-quit-during-verify: quit the way a person does while Squirrel is still verifying the downloaded update.
+    Pass = the app exits within `quit_timeout`, and the update is then installed, or offered again (staged) at the
+    next launch. Bring-up run 45087190217: a 2.0.4 app quit in that gap was still running 10 minutes later."""
+    if plat.name != "macos":
+        return "fail", "unsupported_on_platform", plat.version(), extra
+    end = now() + 900
+    while True:
+        if plat.in_verify_window(want):
+            break
+        if plat.staged(want):
+            extra["window"] = "missed"
+            return "inconclusive", "verify_window_missed", plat.version(), extra
+        if now() >= end:
+            return "inconclusive", "update_never_ready", plat.version(), extra
+        sleep(0.2)
+    extra["window"] = "hit"
+    if not plat.quit_like_a_person(timeout=quit_timeout):
+        plat.snapshot("quit while Squirrel was verifying, still running")
+        return "fail", "still_running_expected_exit", plat.version(), extra
+    end = now() + 120
+    while plat.version() != want and now() < end:
+        sleep(3)
+    if plat.version() == want:
+        extra["outcome"] = "installed"
+        if not landed.mac_signature_valid(plat.app):
+            return "fail", "signature_invalid", want, extra
+        return "pass", "ok", want, extra
+    plat.launch()
+    end = now() + 600
+    while not plat.staged(want) and now() < end:
+        sleep(3)
+    if plat.staged(want):
+        extra["outcome"] = "offered_again"
+        return "pass", "ok", plat.version(), extra
+    return "fail", "update_never_ready", plat.version(), extra
+
+
 def timeout_reason(r: dict, path: str) -> str:
     """Which step an offer that timed out stopped at (bring-up run 45097794033 had only `offer_timeout`)."""
     if r.get("header") == "not_clickable":
@@ -621,13 +832,37 @@ def timeout_reason(r: dict, path: str) -> str:
     return "offer_timeout"
 
 
+def old_quit_word(log: str) -> str:
+    """How the clicked app's own quit went, from its main.log after the click: finished (its child-stop step logged
+    its result), stalled (it began quitting and logged nothing after), or not_logged."""
+    if "stopped=" in log or any(line in log for line in QUIT_DONE_LINES):
+        return "finished"
+    if "[Quit] quit begun" in log:
+        return "stalled"
+    return "not_logged"
+
+
 def after_click(plat, ctx, t0, want, frm, watch, extra):
+    if plat.name == "windows":
+        plat.dumps_after_close("after Restart & Install")
+    old = getattr(plat, "proc", None)
+    old_exit = None
     end = time.monotonic() + 600
     while plat.version() != want and time.monotonic() < end:
+        if old is not None and old_exit is None and old.poll() is not None:
+            old_exit = int(time.time() - t0)
         time.sleep(5)
     got = plat.version()
     if watch:
         extra["setup_window"] = "seen" if watch.seen else "not_seen"
+    if plat.name == "windows":
+        # Coordinator, 23 Nov: after Restart & Install, did the old app's quit hang, and did the silent installer
+        # close it (NSIS app-close) or give up? Seconds from the click until the clicked app exited (None = never).
+        if old is not None and old_exit is None and old.poll() is not None:
+            old_exit = int(time.time() - t0)
+        extra["old_app_exit_s"] = old_exit
+        extra["old_quit"] = old_quit_word(plat.log_since_launch())
+        extra["trace"] = trace_class(plat)
     if got != want or plat.files_version() != want:
         if plat.name == "windows":
             plat.snapshot("after the click, the version did not change")
@@ -993,7 +1228,7 @@ def main(argv=None) -> int:
                     break
             fl.current = None
             say(f"cell {rec['id']}: {rec['result']} {rec['detail']} ({rec['seconds']} s, attempt {rec['attempts']})")
-        rc = 0 if cells and all(c["result"] == "pass" for c in receipt["cells"]) else 1
+        rc = 0 if common.all_blocking_passed(receipt["cells"]) else 1
     except RuntimeError as e:
         note(f"setup refused: {e}")
         say("setup: refused")
@@ -1014,6 +1249,10 @@ def main(argv=None) -> int:
             for rec in recs:
                 rec.pop("_open", None)
             fl._write()
+    if cells and all(c.get("kind") == "reported" for c in cells):
+        # A reported cell is recorded on the receipt and never fails its job (the publish step needs every job green).
+        say("overall: reported only")
+        return 0
     say(f"overall: {'pass' if rc == 0 else 'not pass'}")
     return rc
 
