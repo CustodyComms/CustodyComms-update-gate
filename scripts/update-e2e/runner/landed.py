@@ -107,6 +107,21 @@ def health_ok(url: str = HEALTH_URL, timeout_s: float = 180, sleep=time.sleep, n
     return False
 
 
+def install_dir(location: str | None, uninstall: str | None, icon: str | None = None) -> str | None:
+    """The install folder from an Uninstall key. InstallLocation when the installer wrote one (bring-up: the 1.9.0
+    installer does not), else the folder of the quoted uninstaller in UninstallString, else of DisplayIcon."""
+    if location and str(location).strip():
+        return str(location).strip().rstrip("\\")
+    for raw in (uninstall, icon):
+        s = str(raw or "").strip()
+        m = re.match(r'^"([^"]+)"', s) or re.match(r"^(.+?\.exe)\b", s, re.I)
+        if m:
+            path = m.group(1).split(",")[0]
+            if "\\" in path:
+                return path.rsplit("\\", 1)[0]
+    return None
+
+
 # ── Windows (runner only) ─────────────────────────────────────────────────────────────────────────
 
 
@@ -140,7 +155,7 @@ def win_installs() -> list[dict]:
                     return None
             out.append({"hive": "HKCU" if hive == winreg.HKEY_CURRENT_USER else "HKLM",
                         "version": val("DisplayVersion"), "uninstall": val("UninstallString"),
-                        "location": val("InstallLocation")})
+                        "location": install_dir(val("InstallLocation"), val("UninstallString"), val("DisplayIcon"))})
     return out
 
 

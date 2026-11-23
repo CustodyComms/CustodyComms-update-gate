@@ -38,7 +38,11 @@ function Stop-With([string] $reason) { Write-Result '' $reason; Write-Host "FAIL
 function Get-CCInstall {
   $u = @(Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue | Get-ItemProperty | Where-Object { $_.DisplayName -like 'CustodyComms*' })
   if ($u.Count -ne 1) { Stop-With 'precondition_failed' }
-  [pscustomobject]@{ Version = $u[0].DisplayVersion; Dir = ([string]$u[0].InstallLocation).TrimEnd('\'); Uninstall = $u[0].UninstallString }
+  # InstallLocation when the installer wrote one (the 1.9.0 installer does not), else the quoted uninstaller's folder.
+  $dir = ([string]$u[0].InstallLocation).TrimEnd('\')
+  if (-not $dir -and ([string]$u[0].UninstallString) -match '^"([^"]+)"') { $dir = Split-Path -Parent $Matches[1] }
+  if (-not $dir) { Stop-With 'precondition_failed' }
+  [pscustomobject]@{ Version = $u[0].DisplayVersion; Dir = $dir; Uninstall = $u[0].UninstallString }
 }
 
 function Get-AsarVersion([string] $asar) {

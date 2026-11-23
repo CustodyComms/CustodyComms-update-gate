@@ -362,8 +362,20 @@ class Mac:
             return any(landed.bundle_version(p.parents[1]) == want for p in d.glob("update.*/*.app/Contents/Info.plist"))
         return any(p.name.endswith(".plist") for p in d.glob("*"))
 
-    def ready_on_disk(self, want: str) -> bool:
-        return self.staged(want)
+    STAGE_SETTLE_S = 30
+
+    def ready_on_disk(self, want: str, now=time.monotonic) -> bool:
+        """Squirrel's unpacked copy has been there for STAGE_SETTLE_S. Bring-up run 45087190217: the copy appears
+        when the download lands, about 3 s before Squirrel reports it staged; quitting in that gap left the app
+        running for 10 minutes."""
+        if not self.staged(want):
+            self._seen = None
+            return False
+        seen = getattr(self, "_seen", None)
+        if seen is None or seen[0] != want:
+            self._seen = (want, now())
+            return False
+        return now() - self._seen[1] >= self.STAGE_SETTLE_S
 
     def build_from(self, ver: str, per_machine=False) -> None:
         if (self.snap / ver).exists():
@@ -507,7 +519,7 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
             return after_click(plat, ctx, t0, want, frm, watch, extra)
         if plat.name == "macos":
             end = time.monotonic() + 300
-            while not plat.staged(want) and time.monotonic() < end:
+            while not plat.ready_on_disk(want) and time.monotonic() < end:
                 time.sleep(3)
         if path == "close":
             extra["close"] = plat.close_window(browser)
