@@ -153,6 +153,25 @@ def feed_yml_text(original: str, mode: str, staging_repo: str = "", probe_url: s
     return "\n".join(["provider: generic", f"url: {url}", *kept]) + "\n"
 
 
+def read_log_from(path: Path | None, offset: int) -> str | None:
+    """The app's main.log from `offset` on; None when there is no log file (a gate fault, never a pass)."""
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            return f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def size_of(path: Path | None) -> int:
+    try:
+        return path.stat().st_size if path is not None else 0
+    except OSError:
+        return 0
+
+
 def launched_exited(plat, timeout: float, step: float, now=time.monotonic, sleep=time.sleep) -> bool:
     """The app the gate launched has exited. Judged by that process itself (Popen.poll, which also reaps it), not
     by scanning for the executable's path: run 45137602974 counted macOS apps as still running after they had quit
@@ -259,12 +278,7 @@ class Win:
 
     def log_since_launch(self) -> str:
         """The app's own main.log from the last launch on (it appends across launches)."""
-        try:
-            with open(self.main_log(), "rb") as f:
-                f.seek(getattr(self, "log_offset", 0))
-                return f.read().decode("utf-8", errors="replace")
-        except OSError:
-            return ""
+        return read_log_from(self.main_log(), getattr(self, "log_offset", 0))
 
     def close_and_time(self, limit: float) -> tuple[bool, int]:
         """One person-like close (SC_CLOSE to the visible window, after it has been up 20 s) and whether the launched
@@ -459,7 +473,36 @@ class Mac:
         if self.app.exists() or self.running():
             raise RuntimeError("reset_failed")
 
+    def main_log(self) -> Path | None:
+        """electron-log's default on macOS (2.0.x set only its level): ~/Library/Logs/<product name>/main.log."""
+        for p in (self.home / "Library" / "Logs" / "CustodyComms" / "main.log", self.data / "logs" / "main.log"):
+            if p.is_file():
+                return p
+        return None
+
+    def log_since_launch(self) -> str | None:
+        return read_log_from(getattr(self, "log_path", None) or self.main_log(), getattr(self, "log_offset", 0))
+
+    def census(self, procs=None) -> list[str]:
+        """App processes left: anything running from the app bundle or the data folder (Ollama and the backend's
+        python live there), except Squirrel's ShipIt, which is the install itself."""
+        import psutil
+
+        roots = [str(self.app).lower() + "/", str(self.data).lower() + "/"]
+        left = []
+        for p in (procs if procs is not None else psutil.process_iter(["name", "exe", "pid"])):
+            info = p.info if hasattr(p, "info") else p
+            name, exe = (info.get("name") or ""), (info.get("exe") or "").lower()
+            if name.lower() == "shipit":
+                continue
+            if any(exe.startswith(r) for r in roots):
+                left.append(f"{name} {info.get('pid')}")
+        note(f"census: {left}")
+        return left
+
     def launch(self, debug=True) -> subprocess.Popen:
+        self.log_path = self.main_log()
+        self.log_offset = size_of(self.log_path)
         out = open(self.cache / f"app-{int(time.time())}.log", "wb")
         DIAG_FILES.append(Path(out.name))
         self.proc = subprocess.Popen([str(self.exe)] + ([f"--remote-debugging-port={DEBUG_PORT}"] if debug else []), stdout=out, stderr=out)
@@ -700,6 +743,14 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
             if not launched_exited(plat, 600, 3):
                 plat.snapshot("window closed, still running")
                 return "fail", "still_running_expected_exit", plat.version(), extra
+        elif plat.name == "macos" and frm == "candidate":
+            # mac-self-quit: the candidate's own quit must end it within 60 s, logged as a normal quit, nothing left.
+            if not plat.quit_like_a_person(timeout=60):
+                plat.snapshot("asked to quit, still running")
+                return "fail", "still_running_expected_exit", plat.version(), extra
+            bad = quit_checks(plat, extra, time.time())
+            if bad:
+                return bad
         elif not plat.quit_like_a_person(timeout=300):
             plat.snapshot("asked to quit, still running")
             return "fail", "still_running_expected_exit", plat.version(), extra
@@ -712,6 +763,28 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
 
 QUIT_DONE_LINES = ("[Quit] child processes stopped: quitting", "[Quit] child processes not confirmed stopped: quitting")
 QUIT_BACKSTOP_LINE = "[Quit] the quit did not finish in 10 s"
+
+
+def quit_checks(plat, extra, exit_at, sleep=time.sleep, wall=time.time):
+    """After the candidate quit by itself (both platforms): its main.log from that launch carries the normal quit
+    line and not the 10 s backstop line, and 15 s after the exit none of its processes is left. None = all hold."""
+    log = plat.log_since_launch()
+    if log is None:
+        extra["main_log"] = "missing"
+        return "inconclusive", "quit_not_logged", plat.version(), extra
+    if QUIT_BACKSTOP_LINE in log:
+        plat.snapshot("the quit was ended by the backstop")
+        return "fail", "backstop_exit", plat.version(), extra
+    if not any(line in log for line in QUIT_DONE_LINES):
+        plat.snapshot("no normal quit line in main.log")
+        return "fail", "quit_not_logged", plat.version(), extra
+    sleep(max(0.0, 15 - (wall() - exit_at)))
+    left = plat.census()
+    extra["orphans"] = len(left)
+    if left:
+        plat.snapshot("processes left 15 s after the quit")
+        return "fail", "orphans", plat.version(), extra
+    return None
 
 
 def win_quit_from_self(plat, ctx, want, extra, now=time.monotonic, sleep=time.sleep, wall=time.time) -> tuple:
@@ -756,20 +829,9 @@ def win_quit_from_self(plat, ctx, want, extra, now=time.monotonic, sleep=time.sl
     if not exited:
         plat.snapshot("candidate closed with the probe ready, still running")
         return "fail", "still_running_expected_exit", plat.version(), extra
-    exit_at = wall()
-    log = plat.log_since_launch()
-    if QUIT_BACKSTOP_LINE in log:
-        plat.snapshot("the quit was ended by the backstop")
-        return "fail", "backstop_exit", plat.version(), extra
-    if not any(line in log for line in QUIT_DONE_LINES):
-        plat.snapshot("no normal quit line in main.log")
-        return "fail", "quit_not_logged", plat.version(), extra
-    sleep(max(0.0, 15 - (wall() - exit_at)))
-    left = plat.census()
-    extra["orphans"] = len(left)
-    if left:
-        plat.snapshot("processes left 15 s after the quit")
-        return "fail", "orphans", plat.version(), extra
+    bad = quit_checks(plat, extra, wall(), sleep=sleep, wall=wall)
+    if bad:
+        return bad
     end = now() + 600
     while plat.version() != want and now() < end:
         sleep(5)
@@ -861,7 +923,7 @@ def after_click(plat, ctx, t0, want, frm, watch, extra):
         if old is not None and old_exit is None and old.poll() is not None:
             old_exit = int(time.time() - t0)
         extra["old_app_exit_s"] = old_exit
-        extra["old_quit"] = old_quit_word(plat.log_since_launch())
+        extra["old_quit"] = old_quit_word(plat.log_since_launch() or "")
         extra["trace"] = trace_class(plat)
     if got != want or plat.files_version() != want:
         if plat.name == "windows":
