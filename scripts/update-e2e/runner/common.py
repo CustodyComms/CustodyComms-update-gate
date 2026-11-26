@@ -77,6 +77,73 @@ def sha256_hex(path: Path) -> str:
     return h.hexdigest()
 
 
+# ── a file staged as parts ────────────────────────────────────────────────────────────────────────
+
+# A release asset has a size limit (2 GiB), so a larger file is staged as ordered parts, listed in the inventory
+# under the one file they join to. No part may be larger than this.
+PART_MAX_BYTES = 2_000_000_000
+PART_MAX_COUNT = 16  # so a file in parts is at most 32,000,000,000 bytes
+
+
+def plain_name(v) -> bool:
+    """A bare file name: nothing that could name a folder, a drive or another place."""
+    return (isinstance(v, str) and 0 < len(v) <= 200 and v not in (".", "..") and v[-1] not in ". "
+            and not any(c in "/\\:" or c < " " for c in v))
+
+
+def part_name(name: str, i: int, n: int) -> str:
+    """The release asset holding part `i` of `n` (counted from 1) of the file `name`."""
+    return f"{name}.part{i}of{n}"
+
+
+def _is_sha256(v) -> bool:
+    return isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v)
+
+
+def _is_sha512_b64(v) -> bool:
+    """The form `sha512_b64` writes: 64 bytes in base64, 88 characters."""
+    return (isinstance(v, str) and len(v) == 88 and v.endswith("==")
+            and all(c.isascii() and (c.isalnum() or c in "+/") for c in v[:86]))
+
+
+def _is_count(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+
+def parts_problems(ent) -> list[str]:
+    """Every reason an inventory entry with `parts` is not ONE file cut into ordered parts. Empty = it is."""
+    if not isinstance(ent, dict) or not plain_name(ent.get("name")):
+        return ["an entry in parts has no plain file name"]
+    name = ent["name"]
+    bad = []
+    if not _is_count(ent.get("size")):
+        bad.append(f"{name}: size is not a positive whole number")
+    if not _is_sha256(ent.get("sha256")):
+        bad.append(f"{name}: no sha256 of the whole file")
+    if not _is_sha512_b64(ent.get("sha512")):
+        bad.append(f"{name}: no sha512 of the whole file")
+    parts = ent.get("parts")
+    if not isinstance(parts, list) or not 2 <= len(parts) <= PART_MAX_COUNT:
+        return [*bad, f"{name}: a file in parts has at least two parts and at most {PART_MAX_COUNT}"]
+    total = 0
+    for i, p in enumerate(parts, 1):
+        want = part_name(name, i, len(parts))
+        if not isinstance(p, dict):
+            bad.append(f"{name}: part {i} is not an entry")
+            continue
+        if p.get("name") != want:
+            bad.append(f"{name}: part {i} is named {p.get('name')!r}, want {want!r}")
+        if not _is_count(p.get("size")) or p["size"] > PART_MAX_BYTES:
+            bad.append(f"{name}: part {i} must hold at least 1 and at most {PART_MAX_BYTES} bytes")
+        else:
+            total += p["size"]
+        if not _is_sha256(p.get("sha256")):
+            bad.append(f"{name}: part {i} has no sha256")
+    if not bad and total != ent["size"]:
+        bad.append(f"{name}: the parts do not add up to the file ({total} bytes, want {ent['size']})")
+    return bad
+
+
 def files_hash(repo: Path, commit: str = "HEAD") -> tuple[str, list[str]]:
     """sha256 over the sorted `<mode> <blob> <path>` lines of the gate files at `commit`. Blob ids, not
     working-tree bytes, so a checkout that converts line endings hashes the same."""

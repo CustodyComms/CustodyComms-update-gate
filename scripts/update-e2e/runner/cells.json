@@ -86,18 +86,6 @@
    ]
   },
   {
-   "id": "win-quit-from-2.0.4",
-   "platform": "windows",
-   "from": "2.0.4",
-   "path": "quit",
-   "kind": "required",
-   "variants": [
-    "A",
-    "B",
-    "C"
-   ]
-  },
-  {
    "id": "win-lock",
    "platform": "windows",
    "from": "2.0.4",

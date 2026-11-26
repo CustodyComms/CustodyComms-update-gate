@@ -180,6 +180,36 @@ def win_signature_valid(exe: Path) -> bool:
     return status == "Valid" and bool(WIN_PUBLISHER.search(subject))
 
 
+# The seven names of PowerShell's SignatureStatus. Any other answer is "unreadable" and never a pass.
+WIN_SIGNATURE_WORDS = frozenset({"Valid", "UnknownError", "NotSigned", "HashMismatch", "NotTrusted",
+                                 "NotSupportedFileFormat", "Incompatible"})
+# The INSTALLED app exe (not an installer). No Windows build signs it yet: the build leaves the app exe as it is
+# and only the installer goes to the signer, so `NotSigned` is the true state of every install and is accepted.
+# Set this to False once a release signs the app exe; from then on only the publisher's `Valid` passes.
+WIN_LANDED_UNSIGNED_OK = True
+
+
+def win_landed_signature(exe: Path | None) -> tuple[bool, str]:
+    """(acceptable, word for the receipt) for the INSTALLED app exe. Acceptable: `Valid` from the publisher, or
+    `NotSigned` while WIN_LANDED_UNSIGNED_OK. A signature that is there and wrong (HashMismatch, NotTrusted, any
+    other status, another publisher), an answer that cannot be read and a missing exe all fail. A file that never
+    had a signature and one whose signature was removed both read NotSigned; this check cannot tell them apart.
+    The word is one of a closed list of ten, so nothing a file or a tool wrote reaches the receipt."""
+    if exe is None or not Path(exe).is_file():
+        return False, "exe_missing"
+    try:
+        status, subject = win_signature_status(Path(exe))
+    except (OSError, subprocess.SubprocessError):
+        return False, "unreadable"
+    if status not in WIN_SIGNATURE_WORDS:
+        return False, "unreadable"
+    if status == "Valid":
+        return (True, "Valid") if WIN_PUBLISHER.search(subject) else (False, "Valid_other_publisher")
+    if status == "NotSigned":
+        return WIN_LANDED_UNSIGNED_OK, "NotSigned"
+    return False, status
+
+
 # ── processes (both) ──────────────────────────────────────────────────────────────────────────────
 
 

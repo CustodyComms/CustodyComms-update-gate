@@ -16,6 +16,7 @@ Exit: 0 every cell passed; 1 any cell did not pass (or mode=pin, which only meas
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -92,15 +93,67 @@ class Staging:
         self.files: dict[str, dict] = {}
 
     def get(self, name: str, base: str | None = None) -> Path:
-        ent = next((a for a in self.inv["assets"] + self.inv.get("extras", []) if a["name"] == name), None)
-        if ent is None:
+        asset = next((a for a in self.inv["assets"] if a["name"] == name), None)
+        ent = asset or next((a for a in self.inv.get("extras", []) if a["name"] == name), None)
+        if ent is None or (asset is not None and "parts" in asset):  # a draft asset is never staged as parts
             raise RuntimeError("download_mismatch")
-        p = fetch(f"{base or self.base}/{name}", self.cache / name)
+        if "parts" in ent:
+            p = self._joined(ent, base or self.base)
+        else:
+            p = fetch(f"{base or self.base}/{name}", self.cache / name)
         if p.stat().st_size != ent["size"] or common.sha512_b64(p) != ent["sha512"]:
             p.unlink()
             raise RuntimeError("download_mismatch")
-        self.files[name] = {"name": name, "size": ent["size"], "sha512": ent["sha512"]}
+        if asset is not None:
+            # Candidate files are the draft's own files: the publish step holds each one against the draft's feed
+            # file. A file staged beside the draft is not in that feed; it is bound by the inventory, whose sha256
+            # the receipt carries.
+            self.files[name] = {"name": name, "size": ent["size"], "sha512": ent["sha512"]}
         return p
+
+    def _joined(self, ent: dict, base: str) -> Path:
+        """A file staged as parts (too large for one release asset): every part is checked by size and sha256 and
+        appended in the listed order, then the join is checked by size and sha256. A part that is wrong, missing
+        or out of place ends here; nothing is left behind that a second attempt could take for the file (a stale
+        `.joining` file is overwritten, a part that failed its check is deleted)."""
+        dest = self.cache / ent["name"]
+        if common.parts_problems(ent):
+            dest.unlink(missing_ok=True)
+            raise RuntimeError("download_mismatch")
+        if dest.exists():
+            return dest  # joined by an earlier attempt; the caller checks the whole file again
+        tmp = self.cache / (ent["name"] + ".joining")
+        whole = hashlib.sha256()
+        n = len(ent["parts"])
+        kept: list[Path] = []  # checked parts stay in the cache until the join is good: a retry fetches only the rest
+        ok = False
+        try:
+            with open(tmp, "wb") as out:
+                for i, part in enumerate(ent["parts"], 1):
+                    pp = fetch(f"{base}/{part['name']}", self.cache / part["name"])
+                    if pp.stat().st_size != part["size"] or common.sha256_hex(pp) != part["sha256"]:
+                        note(f"part {i} of {n}: {pp.stat().st_size} bytes (listed {part['size']}), not the listed bytes")
+                        pp.unlink()
+                        raise RuntimeError("download_mismatch")
+                    with open(pp, "rb") as f:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            whole.update(chunk)
+                            out.write(chunk)
+                    kept.append(pp)
+            ok = tmp.stat().st_size == ent["size"] and whole.hexdigest() == ent["sha256"]
+            if not ok:
+                note(f"the {n} parts joined are not the listed file ({tmp.stat().st_size} bytes, listed {ent['size']})")
+        except OSError as e:
+            note(f"part {len(kept) + 1} of {n} could not be fetched or written: {type(e).__name__}")
+        finally:
+            if not ok:
+                tmp.unlink(missing_ok=True)
+        if not ok:
+            raise RuntimeError("download_mismatch")
+        tmp.replace(dest)
+        for pp in kept:
+            pp.unlink(missing_ok=True)
+        return dest
 
     def candidate_asset(self, suffix: str, version: str | None = None) -> str:
         """The one draft asset that is `version`'s file of this kind (the draft can also carry an older version's
@@ -839,7 +892,7 @@ def win_quit_from_self(plat, ctx, want, extra, now=time.monotonic, sleep=time.sl
     if got != want or plat.files_version() != want:
         plat.snapshot("the probe did not land after the quit")
         return "fail", "wrong_version", got, extra
-    if not landed.win_signature_valid(plat.app_exe()):
+    if not landed_signature_ok(plat, extra):
         return "fail", "signature_invalid", got, extra
     return "pass", "ok", got, extra
 
@@ -954,11 +1007,21 @@ def after_quit(plat, ctx, t0, want, frm, watch, extra):
     return common_checks(plat, ctx, frm, want, watch, extra)
 
 
+def landed_signature_ok(plat, extra) -> bool:
+    """The signature of the app as it is installed after the update. macOS: the strict deep check naming the
+    publisher's team. Windows: the app exe's status word goes on the cell (`landed_exe_signature`), pass or fail;
+    which words pass is landed.win_landed_signature's to say. Installers are checked elsewhere, before they run."""
+    if plat.name == "macos":
+        return landed.mac_signature_valid(plat.app)
+    ok, word = landed.win_landed_signature(plat.app_exe())
+    extra["landed_exe_signature"] = word
+    if not ok:
+        note(f"signature of the landed app: {word}")
+    return ok
+
+
 def common_checks(plat, ctx, frm, want, watch, extra):
-    sig = landed.mac_signature_valid(plat.app) if plat.name == "macos" else landed.win_signature_valid(plat.app_exe())
-    if not sig:
-        if plat.name == "windows":
-            note(f"signature of the landed app: {landed.win_signature_status(plat.app_exe())[0]}")
+    if not landed_signature_ok(plat, extra):
         return "fail", "signature_invalid", want, extra
     if watch and watch.seen:
         return "fail", "setup_window_seen", want, extra
