@@ -227,10 +227,97 @@ def started_after(exe_path: str, t0_epoch: float) -> list:
     return hits
 
 
-def wait_started(exe_path: str, t0_epoch: float, timeout_s: float, sleep=time.sleep, now=time.monotonic):
+def is_child_process(cmdline) -> bool:
+    """An Electron child: its command line can be read and names `--type=<kind>` (renderer, gpu-process, utility,
+    crashpad-handler). On Windows these run from the app's own exe; the main (browser) process has no `--type=`. A
+    command line that cannot be read or is empty is not called a child, so such a process is counted exactly as it
+    was before this check existed."""
+    if not isinstance(cmdline, (list, tuple)):
+        return False
+    return any(isinstance(a, str) and a.startswith("--type=") for a in cmdline)
+
+
+def child_kind(cmdline) -> str:
+    """For the diagnostics: `main`, or the child's --type value."""
+    for a in cmdline if isinstance(cmdline, (list, tuple)) else ():
+        if isinstance(a, str) and a.startswith("--type="):
+            return a[len("--type="):][:40]
+    return "main"
+
+
+def main_started_after(exe_path: str, t0_epoch: float) -> list:
+    """`started_after`, without the Electron children: the app's own (main) processes started at or after t0."""
+    import psutil
+
+    want = str(exe_path).lower()
+    hits = []
+    for p in psutil.process_iter(["exe", "create_time", "cmdline"]):
+        try:
+            info = p.info
+            if (info["exe"] or "").lower() == want and info["create_time"] >= t0_epoch and not is_child_process(info.get("cmdline")):
+                hits.append(p)
+        except Exception:
+            continue
+    return hits
+
+
+def describe_started_after(exe_path: str, t0_epoch: float) -> list[str]:
+    """For the encrypted diagnostics: `pid <n> <main|kind> +<s>s` for every process of exe_path started at or after t0."""
+    import psutil
+
+    want = str(exe_path).lower()
+    out = []
+    try:
+        for p in psutil.process_iter(["pid", "exe", "create_time", "cmdline"]):
+            try:
+                info = p.info
+                if (info["exe"] or "").lower() == want and info["create_time"] >= t0_epoch:
+                    out.append(f"pid {info['pid']} {child_kind(info.get('cmdline'))} +{int(info['create_time'] - t0_epoch)}s")
+            except Exception:
+                continue
+    except Exception as e:  # noqa: BLE001 - diagnostics only: never the reason a cell fails
+        out.append(f"listing stopped: {type(e).__name__}")
+    return out
+
+
+def main_running_since(exe_path: str, t0_epoch: float) -> list:
+    """The app's main processes started at or after t0 that are running now. A fresh scan, so a main process the app
+    started in place of the first one (a relaunch) counts. A process that is gone (NoSuchProcess) or a zombie is not
+    running; one whose state cannot be read (AccessDenied, anything else) is counted as running: an answer that is
+    not known is never read as an exit."""
+    import psutil
+
+    gone = getattr(psutil, "NoSuchProcess", ProcessLookupError)
+    alive = []
+    for p in main_started_after(exe_path, t0_epoch):
+        try:
+            if not p.is_running():
+                continue
+        except gone:
+            continue
+        except Exception:  # noqa: BLE001 - not known: counted, see above
+            alive.append(p)
+            continue
+        try:
+            if p.status() == getattr(psutil, "STATUS_ZOMBIE", "zombie"):
+                continue
+        except Exception:  # noqa: BLE001 - is_running above already answered
+            pass
+        alive.append(p)
+    return alive
+
+
+def wait_started(exe_path: str, t0_epoch: float, timeout_s: float, sleep=time.sleep, now=time.monotonic,
+                 seen: list | None = None):
+    """The first main process of the app started at or after t0, or None after `timeout_s`. A child (renderer, GPU,
+    utility) is never returned: run 45743211127 took a splash window's renderer for the app and failed the cell
+    `reopened_exited` when that window closed. With `seen`, every process of the exe met during the wait is added
+    to it once (describe_started_after's rows), for the diagnostics."""
     end = now() + timeout_s
     while now() < end:
-        hits = started_after(exe_path, t0_epoch)
+        hits = main_started_after(exe_path, t0_epoch)
+        if seen is not None:
+            seen.extend(r for r in describe_started_after(exe_path, t0_epoch) if r not in seen)
         if hits:
             return hits[0]
         sleep(2)

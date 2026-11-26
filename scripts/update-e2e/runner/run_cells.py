@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -720,6 +721,7 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
     cand, probe = ctx["candidate"], ctx.get("probe")
     want = probe if frm == "candidate" else cand
     plat.reset()
+    since = time.time()  # this attempt began: a pending-install marker from before it is not this install's
     if path == "fresh-wizard":
         return fresh_wizard(plat, ctx)
     if plat.name == "windows" and frm == "candidate" and path == "quit":
@@ -786,7 +788,7 @@ def run_one(plat, cell: dict, ctx: dict) -> tuple[str, str, str | None, dict]:
         if r["state"] == "timeout":
             return "inconclusive", timeout_reason(r, path), plat.version(), extra
         if path.startswith("click"):
-            return after_click(plat, ctx, t0, want, frm, watch, extra)
+            return after_click(plat, ctx, t0, want, frm, watch, extra, since=since)
         if plat.name == "macos":
             end = time.monotonic() + 300
             while not plat.ready_on_disk(want) and time.monotonic() < end:
@@ -957,7 +959,7 @@ def old_quit_word(log: str) -> str:
     return "not_logged"
 
 
-def after_click(plat, ctx, t0, want, frm, watch, extra):
+def after_click(plat, ctx, t0, want, frm, watch, extra, since=None):
     if plat.name == "windows":
         plat.dumps_after_close("after Restart & Install")
     old = getattr(plat, "proc", None)
@@ -977,19 +979,61 @@ def after_click(plat, ctx, t0, want, frm, watch, extra):
             old_exit = int(time.time() - t0)
         extra["old_app_exit_s"] = old_exit
         extra["old_quit"] = old_quit_word(plat.log_since_launch() or "")
-        extra["trace"] = trace_class(plat)
+        # The first reading, kept as it is: 2.0.5 and later read the file at their next launch and then empty it
+        # (run 45743211127, win-self). common_checks adds the later readings beside it.
+        extra["trace_first"] = trace_class(plat)
     if got != want or plat.files_version() != want:
         if plat.name == "windows":
             plat.snapshot("after the click, the version did not change")
         return "fail", "wrong_version", got, extra
-    exe = plat.exe if plat.name == "macos" else plat.app_exe()
-    proc = landed.wait_started(str(exe), t0 + 1, 180)
+    exe = str(plat.exe if plat.name == "macos" else plat.app_exe())
+    # The app's own (main) process, never one of its Electron children: a renderer of a window the new version
+    # opens and closes within seconds was taken for the app in run 45743211127 (reopened_exited).
+    seen: list = []
+    proc = landed.wait_started(exe, t0 + 1, 180, seen=seen)
     if proc is None:
+        note(f"processes of the app seen during the 180 s wait: {seen}")
+        keep_reopen_evidence(plat, exe, t0, "no main process of the app started after the click")
         return "fail", "not_reopened", got, extra
+    started = landed.describe_started_after(exe, t0 + 1)
     time.sleep(30)
-    if not proc.is_running():
+    alive = landed.main_running_since(exe, t0 + 1)
+    if not alive:
+        note(f"reopened app at +30 s: main pid {proc.pid} not running; processes of the app at the start {started}")
+        keep_reopen_evidence(plat, exe, t0, "no main process of the app is running at +30 s")
         return "fail", "reopened_exited", got, extra
-    return common_checks(plat, ctx, frm, want, watch, extra)
+    return common_checks(plat, ctx, frm, want, watch, extra, since=since)
+
+
+def keep_reopen_evidence(plat, exe: str, t0: float, why: str) -> None:
+    """Into the encrypted diagnostics only: every process of the app's exe started after the click (pid, main or
+    the child's kind, seconds after the click) and a copy of the app's own main.log, so the next failure of this
+    kind can be read. Never breaks the cell."""
+    try:
+        now = landed.describe_started_after(exe, t0 + 1)
+    except Exception as e:  # noqa: BLE001
+        now = [f"not listed: {type(e).__name__}"]
+    note(f"reopen: {why}; processes of the app now (+30 s or at the end of the wait): {now}")
+    keep_app_log(plat, why)
+
+
+def keep_app_log(plat, why: str) -> Path | None:
+    """A copy of the app's main.log (the reopened app writes to the same file) into the encrypted diagnostics."""
+    try:
+        src = plat.main_log()
+    except Exception:  # noqa: BLE001
+        src = None
+    if src is None or not Path(src).is_file():
+        note(f"{why}: no main.log to keep")
+        return None
+    dst = plat.cache / f"applog-{int(time.time())}-reopened-{Path(src).name}"
+    try:
+        shutil.copy(src, dst)
+    except OSError as e:
+        note(f"{why}: main.log not copied ({type(e).__name__})")
+        return None
+    DIAG_FILES.append(dst)
+    return dst
 
 
 def after_quit(plat, ctx, t0, want, frm, watch, extra):
@@ -1020,17 +1064,139 @@ def landed_signature_ok(plat, extra) -> bool:
     return ok
 
 
-def common_checks(plat, ctx, frm, want, watch, extra):
+TRACE_WORDS = ("done", "started_not_finished", "lock_collision", "none")  # landed.read_trace, update-outcome.js
+TRACE_MARKER_WORDS = TRACE_WORDS + ("no_marker", "unreadable", "other_install", "not_reported", "not_read")
+PENDING_INSTALL_FILE = "update-pending-install.json"  # update-outcome.js PENDING_FILE
+TRACE_FILE_NAME = "update-installer-trace.log"  # update-outcome.js TRACE_FILE
+PENDING_INSTALL_FORMAT = "cc-pending-install/1"
+# Routes on which the app restarts into the installer. `quit` and `close_window` are quits: never a click cell's.
+CLICK_ROUTES = frozenset({"click", "required", "force"})
+MARKER_MAX_BYTES = 65536
+MARKER_CLOCK_SLACK_S = 60  # the app and the runner read the same clock; this only allows for a clock step
+
+
+def _iso_epoch(v) -> float | None:
+    """Epoch seconds of an ISO time with a zone (JavaScript's toISOString), else None."""
+    if not isinstance(v, str) or len(v) > 40:
+        return None
+    try:
+        dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        return dt.timestamp() if dt.tzinfo is not None else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def marker_reading(plat, from_ver: str, want: str, since: float | None, wall=time.time) -> tuple[str, str, str | None]:
+    """(word, why, route). `word` is what marker_trace returns; `why` names the check that decided it, for the
+    encrypted diagnostics only; `route` is the marker's route when the marker is this install's, else None."""
+    if since is None:
+        return "not_read", "no attempt time was given", None
+    p = plat.data / PENDING_INSTALL_FILE
+    try:
+        if not p.is_file():
+            return "no_marker", "no marker file", None
+        raw = p.read_bytes()
+    except OSError as e:
+        return "unreadable", f"read: {type(e).__name__}", None
+    if len(raw) > MARKER_MAX_BYTES:
+        return "unreadable", f"{len(raw)} bytes, over {MARKER_MAX_BYTES}", None
+    try:
+        m = json.loads(raw.decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 - bad bytes, bad JSON, absurd nesting: all the same answer
+        return "unreadable", f"parse: {type(e).__name__}", None
+    if not isinstance(m, dict) or m.get("format") != PENDING_INSTALL_FORMAT:
+        return "unreadable", "not a cc-pending-install/1 object", None
+    route, at = m.get("route"), _iso_epoch(m.get("at"))
+    checks = (
+        ("route", isinstance(route, str) and route in CLICK_ROUTES),
+        ("from", m.get("from") == from_ver),
+        ("to", m.get("to") == want),
+        ("at", at is not None and since <= at <= wall() + MARKER_CLOCK_SLACK_S),
+    )
+    bad = [k for k, ok in checks if not ok]
+    if bad:
+        return "other_install", f"differs: {bad}", None
+    rep = m.get("report")
+    if not isinstance(rep, dict):
+        return "not_reported", "no report", None
+    checks = (
+        ("report.route", rep.get("route") == route),
+        ("report.from_version", rep.get("from_version") == from_ver),
+        ("report.expected_version", rep.get("expected_version") == want),
+        ("report.actual_version", rep.get("actual_version") == want),
+    )
+    bad = [k for k, ok in checks if not ok]
+    if bad:
+        return "other_install", f"differs: {bad}", None
+    if "installer_trace" not in rep:
+        return "not_reported", "no report.installer_trace", route
+    t = rep["installer_trace"]
+    if isinstance(t, str) and t in TRACE_WORDS:
+        return t, "this install's report", route
+    return "unreadable", "report.installer_trace is not a trace class", route
+
+
+def marker_trace(plat, from_ver: str, want: str, since: float | None, wall=time.time) -> str:
+    """The installer trace the landed app read at its launch, kept in the pending-install marker it rewrote
+    (update-outcome.js decideOutcome: report.installer_trace), but only when the marker is THIS install's: the
+    format; a click-type route; `from` = this cell's from-version and `to` = the expected version; the report the
+    same, with `actual_version` = the expected version (the landed app took the reading); written at or after this
+    attempt began and not after now. Otherwise one word for why not. Only a word from TRACE_MARKER_WORDS leaves here,
+    so nothing a file wrote reaches the receipt."""
+    return marker_reading(plat, from_ver, want, since, wall)[0]
+
+
+def trace_ok(plat, from_ver: str, want: str, extra: dict, since: float | None) -> bool:
+    """The installer trace of this cell's install (run 45743211127, win-self). Readings, all on the cell:
+    `trace_first` the file right after the version changed (after_click), `trace_file` the file now, `trace_marker`
+    what the landed app read before it emptied the file (marker_trace). `trace` is lock_collision when any reading saw
+    one; else the first reading taken after the install that is not done (the file when it still holds a trace, then
+    the marker's class); else done when one of them is done; else none. Only done passes. The first reading never
+    passes a cell by itself: whether it lands before the app empties the file is a race."""
+    extra["trace_file"] = trace_class(plat)
+    extra["trace_marker"], why, route = marker_reading(plat, from_ver, want, since)
+    if route is not None:
+        extra["trace_marker_route"] = route  # one of CLICK_ROUTES: shows a required or forced restart on the receipt
+    after = [r for r in (extra["trace_file"],) if r != "none"]
+    if extra["trace_marker"] in TRACE_WORDS:
+        after.append(extra["trace_marker"])
+    if "lock_collision" in (extra.get("trace_first"), extra["trace_file"], extra["trace_marker"]):
+        tc = "lock_collision"
+    elif not after:
+        tc = "none"
+    else:
+        tc = next((r for r in after if r != "done"), "done")
+    extra["trace"] = tc
+    if tc != "done":
+        note(f"trace {tc}: first {extra.get('trace_first')}, file {extra['trace_file']}, marker "
+             f"{extra['trace_marker']} ({why})")
+        keep_trace_files(plat)
+    return tc == "done"
+
+
+def keep_trace_files(plat) -> None:
+    """The trace file and the pending-install marker as they are now, into the encrypted diagnostics."""
+    if getattr(plat, "cache", None) is None:
+        return
+    for name in (TRACE_FILE_NAME, PENDING_INSTALL_FILE):
+        src = plat.data / name
+        try:
+            if src.is_file() and src.stat().st_size <= MARKER_MAX_BYTES:
+                dst = plat.cache / f"trace-{int(time.time())}-{name}"
+                shutil.copy(src, dst)
+                DIAG_FILES.append(dst)
+        except OSError as e:
+            note(f"{name} not kept: {type(e).__name__}")
+
+
+def common_checks(plat, ctx, frm, want, watch, extra, since=None):
     if not landed_signature_ok(plat, extra):
         return "fail", "signature_invalid", want, extra
     if watch and watch.seen:
         return "fail", "setup_window_seen", want, extra
-    if plat.name == "windows":
-        tc = trace_class(plat)
-        extra["trace"] = tc
-        if tc != "done":
-            return "fail", "trace_mismatch", want, extra
     from_ver = ctx["candidate"] if frm == "candidate" else frm
+    if plat.name == "windows" and not trace_ok(plat, from_ver, want, extra, since):
+        return "fail", "trace_mismatch", want, extra
     if not arrival_ok(plat, from_ver, want):
         return "fail", "arrival_record_missing", want, extra
     if not landed.health_ok(timeout_s=600):
@@ -1150,31 +1316,115 @@ exit 0
 
 
 FRESH_WIZARD_PS = r"""
-param([string]$Exe, [int]$TimeoutSeconds = 900)
+param([string]$Exe, [int]$TimeoutSeconds = 900, [string]$Shot = '')
+# Run 45743211127 saw this wizard and never advanced it: UIA Invoke on a
+# dialog that was never made active. Now: every distinct page is logged (title, header, each button's name, enabled
+# state and control id); the dialog is brought forward and Next/Install/Finish (NSIS control 1) is clicked by
+# posting WM_COMMAND to the dialog, which needs no focus; UIA Invoke is the fallback. On timeout a screenshot.
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$p = Start-Process -FilePath $Exe -PassThru
-$root = [System.Windows.Automation.AutomationElement]::RootElement
-$seen = $false; $end = (Get-Date).AddSeconds($TimeoutSeconds)
-while (-not $p.HasExited -and (Get-Date) -lt $end) {
-  $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ProcessIdProperty, $p.Id)
-  $win = $root.FindFirst([System.Windows.Automation.TreeScope]::Children, $cond)
-  if ($win -and $win.Current.Name -like 'CustodyComms*Setup*') {
-    $seen = $true
-    $btns = $win.FindAll([System.Windows.Automation.TreeScope]::Descendants, (New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)))
-    foreach ($b in $btns) {
-      $n = $b.Current.Name -replace '&', ''
-      if ($b.Current.IsEnabled -and $n -match '^(Next|Install|Finish)') {
-        $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); break
-      }
-    }
-  }
-  Start-Sleep -Seconds 2
+Add-Type @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class CcWiz {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+  [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  public static string Text(IntPtr h) { var s = new StringBuilder(512); GetWindowText(h, s, 512); return s.ToString(); }
 }
-if (-not $p.HasExited) { Stop-Process -Id $p.Id -Force; Write-Output "timeout seen=$seen"; exit 3 }
-Write-Output "exit=$($p.ExitCode) seen=$seen"
+'@
+$AE = [System.Windows.Automation.AutomationElement]
+$errs = @{}
+function Note-Error([string]$what, $e) {
+  $k = "$what $($e.Exception.Message)"
+  if (-not $errs.ContainsKey($k)) { $errs[$k] = 1; Write-Output ("error {0}: {1}" -f $what, $e.Exception.Message) }
+}
+$p = Start-Process -FilePath $Exe -PassThru
+$null = $p.Handle   # without this a process that has exited reports a null ExitCode
+$root = $AE::RootElement
+$seen = $false; $page = 0; $lastSig = ''; $lastAct = [datetime]::MinValue; $tries = 0
+$start = Get-Date; $end = $start.AddSeconds($TimeoutSeconds)
+$btnCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)
+while (-not $p.HasExited -and (Get-Date) -lt $end) {
+  $wins = @()
+  try {
+    $cond = New-Object System.Windows.Automation.PropertyCondition($AE::ProcessIdProperty, $p.Id)
+    $wins = @($root.FindAll([System.Windows.Automation.TreeScope]::Children, $cond) | Where-Object { $_.Current.Name -like 'CustodyComms*Setup*' })
+  } catch { Note-Error 'find' $_ }
+  foreach ($win in $wins) {
+    try {
+      $seen = $true
+      $h = [IntPtr][int64]$win.Current.NativeWindowHandle
+      $header = [CcWiz]::Text([CcWiz]::GetDlgItem($h, 1037))
+      $btns = @($win.FindAll([System.Windows.Automation.TreeScope]::Descendants, $btnCond))
+      $desc = ($btns | ForEach-Object { '{0}|{1}|{2}' -f ($_.Current.Name -replace '&', ''), $_.Current.IsEnabled, $_.Current.AutomationId }) -join ';'
+      $sig = "$($win.Current.Name)/$header/$desc"
+      if ($sig -ne $lastSig) {
+        $page++; $lastSig = $sig; $tries = 0; $lastAct = [datetime]::MinValue
+        Write-Output ("page {0} at {1}s: title='{2}' header='{3}' hwnd={4}" -f $page, [int]((Get-Date) - $start).TotalSeconds, $win.Current.Name, $header, $h)
+        foreach ($b in $btns) { Write-Output ("  button name='{0}' enabled={1} id={2}" -f ($b.Current.Name -replace '&', ''), $b.Current.IsEnabled, $b.Current.AutomationId) }
+      }
+      $next = [CcWiz]::GetDlgItem($h, 1)
+      $label = [CcWiz]::Text($next) -replace '&', ''
+      if ($next -ne [IntPtr]::Zero -and [CcWiz]::IsWindowEnabled($next) -and $label -match '^(Next|Install|Finish)' -and ((Get-Date) - $lastAct).TotalSeconds -ge 10) {
+        $fg = [CcWiz]::SetForegroundWindow($h)
+        $try = $tries; $tries++; $lastAct = Get-Date   # counted first, so a fallback that throws still alternates
+        if ($try % 2 -eq 0) {
+          $ok = [CcWiz]::PostMessage($h, 0x0111, [IntPtr]1, $next)   # WM_COMMAND, control id 1 (BN_CLICKED), from that button
+          Write-Output ("page {0}: '{1}' by WM_COMMAND posted={2} foreground={3}" -f $page, $label, $ok, $fg)
+        } else {
+          $b = $btns | Where-Object { $_.Current.AutomationId -eq '1' } | Select-Object -First 1
+          if (-not $b) { $b = $btns | Where-Object { ($_.Current.Name -replace '&', '') -match '^(Next|Install|Finish)' } | Select-Object -First 1 }
+          $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+          Write-Output ("page {0}: '{1}' by UIA Invoke foreground={2}" -f $page, $label, $fg)
+        }
+      }
+    } catch { Note-Error 'page' $_ }
+  }
+  Start-Sleep -Seconds 1
+}
+if (-not $p.HasExited) {
+  if ($Shot) {
+    try {
+      Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+      $r = [System.Windows.Forms.SystemInformation]::VirtualScreen
+      $bmp = New-Object System.Drawing.Bitmap $r.Width, $r.Height
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      $g.CopyFromScreen($r.Left, $r.Top, 0, 0, $bmp.Size)
+      $bmp.Save($Shot, [System.Drawing.Imaging.ImageFormat]::Png)
+      $g.Dispose(); $bmp.Dispose()
+      Write-Output "screenshot written"
+    } catch { Note-Error 'screenshot' $_ }
+  }
+  Stop-Process -Id $p.Id -Force
+  Write-Output "timeout seen=$seen pages=$page"
+  exit 3
+}
+Write-Output ("exit={0} seen={1} pages={2} seconds={3}" -f $p.ExitCode, $seen, $page, [int]((Get-Date) - $start).TotalSeconds)
 if (-not $seen) { exit 4 }
+if ($null -eq $p.ExitCode) { exit 5 }
 exit $p.ExitCode
 """
+
+
+def fresh_wizard_run(full: Path, cache: Path, timeout_s: int | None = None) -> subprocess.CompletedProcess:
+    """FRESH_WIZARD_PS on the full installer, clicked through as a person does. Its whole stdout and stderr go into the
+    encrypted diagnostics (the script writes one line per page and per action, at most one action per 10 s), and its
+    screenshot when it timed out. The wizard probe on a real runner calls this same function. `-Exe` stays the last
+    argument."""
+    script = cache / "fresh-wizard.ps1"
+    script.write_text(FRESH_WIZARD_PS, encoding="utf-8")
+    shot = cache / f"fresh-wizard-timeout-{int(time.time())}.png"
+    shot.unlink(missing_ok=True)  # only a screenshot this run wrote is ever kept
+    cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Shot", str(shot)]
+    if timeout_s is not None:
+        cmd += ["-TimeoutSeconds", str(int(timeout_s))]
+    cmd += ["-Exe", str(full)]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+    note(f"fresh-wizard rc={r.returncode}\n--- stdout\n{r.stdout}\n--- stderr\n{r.stderr}\n--- end of fresh-wizard")
+    if shot.is_file():
+        DIAG_FILES.append(shot)
+    return r
 
 
 def fresh_wizard(plat, ctx):
@@ -1185,10 +1435,7 @@ def fresh_wizard(plat, ctx):
     if len(names) != 1:
         return "not_run", "pin_missing", None, {}
     full = st.get(names[0])
-    script = ctx["cache"] / "fresh-wizard.ps1"
-    script.write_text(FRESH_WIZARD_PS, encoding="utf-8")
-    r = subprocess.run(["powershell", "-NoProfile", "-File", str(script), "-Exe", str(full)], capture_output=True, text=True, timeout=1200)
-    note(f"fresh-wizard rc={r.returncode} {r.stdout[-300:]}")
+    r = fresh_wizard_run(full, ctx["cache"])
     if r.returncode == 4:
         return "fail", "control_no_window", plat.version(), {}
     if r.returncode != 0:
